@@ -5,7 +5,6 @@ const optionalString = z.preprocess(
   emptyToUndefined,
   z.string().min(1).optional(),
 );
-const optionalUrl = z.preprocess(emptyToUndefined, z.url().optional());
 
 export const ServerEnvSchema = z.object({
   DATABASE_URL: z.string().min(1),
@@ -16,12 +15,12 @@ export const ServerEnvSchema = z.object({
   OPENROUTER_MODEL: z.literal("openrouter/free"),
   MAGICA_API_KEY: z.string().min(1),
   MAGICA_BASE_URL: z.url(),
-  TRIGGER_SECRET_KEY: z.string().min(1),
+  // Optional until the dispatch slice (PLAN.md BE-0.9). Asserted at the point of
+  // use so stubbed routes stay runnable before the Trigger.dev project exists.
+  TRIGGER_SECRET_KEY: optionalString,
   FRONTEND_ORIGIN: z.url(),
   TRANSLOADIT_AUTH_KEY: optionalString,
   TRANSLOADIT_AUTH_SECRET: optionalString,
-  ASSET_STORAGE_URL: optionalUrl,
-  ASSET_STORAGE_TOKEN: optionalString,
 });
 
 export type ServerEnv = z.infer<typeof ServerEnvSchema>;

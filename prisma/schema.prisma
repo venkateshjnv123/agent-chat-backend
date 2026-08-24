@@ -1,8 +1,287 @@
+// Data model — see ../../SCHEMA.md for the agreed decisions and rationale.
+//
+// Shape mirrors the reference product (Magica) where it was observed:
+//   - one Message row per turn, Anthropic-native contentBlocks in JSONB
+//   - sequence is epoch millis, monotonic per chat, the pagination/recovery cursor
+//   - ToolInvocation rows exist only for real tool executions
+//   - credits are integer microcredits; display M = microcredits / 1e6
+//
+// AgentRun has no equivalent in the reference product, which hangs a triggerRunId
+// on the message instead. We keep it because one-active-run enforcement and
+// idempotent dispatch are graded here, and both need a row to constrain.
+
 generator client {
   provider = "prisma-client"
   output   = "../src/generated/prisma"
 }
 
+// Prisma 7 removed url/directUrl from the schema.
+//   - migrations read DIRECT_URL via prisma.config.ts
+//   - runtime reads DATABASE_URL (pooled) via the pg adapter in src/db/client.ts
 datasource db {
   provider = "postgresql"
+}
+
+// ─── enums ──────────────────────────────────────────────────────────────────
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+enum MessageStatus {
+  PENDING
+  STREAMING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  WAITING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ToolState {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum WaitpointType {
+  PLAN_APPROVAL
+}
+
+enum WaitpointStatus {
+  PENDING
+  RESOLVED
+  EXPIRED
+  CANCELLED
+}
+
+enum PlanResolution {
+  RUN_ALL
+  STEP_BY_STEP
+  REQUEST_CHANGES
+}
+
+enum LedgerKind {
+  RESERVE
+  SETTLE
+  REFUND
+}
+
+enum AttachmentStatus {
+  PENDING
+  UPLOADING
+  READY
+  FAILED
+}
+
+// ─── identity ───────────────────────────────────────────────────────────────
+
+model UserAccount {
+  id          String   @id @default(cuid())
+  clerkUserId String   @unique
+  email       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  chats         Chat[]
+  creditAccount CreditAccount?
+  attachments   Attachment[]
+}
+
+// ─── conversation ───────────────────────────────────────────────────────────
+
+model Chat {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String?
+  modelId   String   @default("openrouter/free")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user        UserAccount  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages    Message[]
+  runs        AgentRun[]
+  attachments Attachment[]
+
+  @@index([userId, updatedAt, id])
+}
+
+model Message {
+  id     String        @id @default(cuid())
+  chatId String
+  role   MessageRole
+  status MessageStatus @default(PENDING)
+
+  content       String  @default("")
+  contentBlocks Json?
+  assets        Json?
+  reasoning     String?
+
+  sequence   BigInt
+  runId      String?
+  creditUsed Int      @default(0)
+  tokenUsage Json?
+  aiModel    Json?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  chat            Chat             @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  run             AgentRun?        @relation(fields: [runId], references: [id], onDelete: SetNull)
+  toolInvocations ToolInvocation[]
+  attachments     Attachment[]
+
+  @@unique([chatId, sequence])
+  @@index([chatId, sequence(sort: Desc), id])
+}
+
+// ─── run ────────────────────────────────────────────────────────────────────
+
+model AgentRun {
+  id             String    @id @default(cuid())
+  chatId         String
+  status         RunStatus @default(QUEUED)
+  triggerRunId   String?   @unique
+  idempotencyKey String    @unique
+  routedModel    String?
+  turns          Int       @default(0)
+  errorCode      String?
+  userMessage    String?
+  traceId        String?
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  chat            Chat                @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  messages        Message[]
+  toolInvocations ToolInvocation[]
+  skills          RunSkill[]
+  waitpoints      Waitpoint[]
+  ledgerEntries   CreditLedgerEntry[]
+
+  @@index([chatId, createdAt])
+  // Partial unique index (one active run per chat) is added by raw SQL in the
+  // migration — Prisma cannot express a WHERE clause on an index.
+}
+
+model ToolInvocation {
+  id        String @id @default(cuid())
+  runId     String
+  messageId String?
+
+  toolName       String
+  rendererKey    String
+  state          ToolState @default(PENDING)
+  executionKey   String    @unique
+  sanitizedInput Json
+  result         Json?
+  externalRunId  String?
+  resultUrl      String?
+  errorCode      String?
+  userMessage    String?
+  creditUsed     Int       @default(0)
+  startedAt      DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime  @default(now())
+
+  run     AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  message Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([runId, createdAt])
+  @@index([externalRunId])
+}
+
+model RunSkill {
+  id          String   @id @default(cuid())
+  runId       String
+  name        String
+  contentHash String
+  loadedAt    DateTime @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, name])
+}
+
+model Waitpoint {
+  id         String          @id @default(cuid())
+  runId      String
+  type       WaitpointType   @default(PLAN_APPROVAL)
+  status     WaitpointStatus @default(PENDING)
+  token      String          @unique
+  payload    Json
+  resolution PlanResolution?
+  resolvedAt DateTime?
+  expiresAt  DateTime
+  createdAt  DateTime        @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId, status])
+}
+
+// ─── uploads (Phase 3, modelled now) ────────────────────────────────────────
+
+model Attachment {
+  id         String           @id @default(cuid())
+  ownerId    String
+  chatId     String?
+  messageId  String?
+  assemblyId String?          @unique
+  status     AttachmentStatus @default(PENDING)
+  mimeType   String?
+  fileSize   Int?
+  width      Int?
+  height     Int?
+  filename   String?
+  resultUrl  String?
+  order      Int              @default(0)
+  createdAt  DateTime         @default(now())
+
+  owner   UserAccount @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  chat    Chat?       @relation(fields: [chatId], references: [id], onDelete: SetNull)
+  message Message?    @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([chatId, order])
+  @@index([ownerId, createdAt])
+}
+
+// ─── credits ────────────────────────────────────────────────────────────────
+
+model CreditAccount {
+  id        String   @id @default(cuid())
+  ownerId   String   @unique
+  balance   Int      @default(5000000) // microcredits — 5.00M, small enough to demo exhaustion
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner   UserAccount         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  entries CreditLedgerEntry[]
+}
+
+model CreditLedgerEntry {
+  id        String     @id @default(cuid())
+  accountId String
+  runId     String?
+  delta     Int
+  kind      LedgerKind
+  opKey     String     @unique
+  toolName  String?
+  note      String?
+  createdAt DateTime   @default(now())
+
+  account CreditAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  run     AgentRun?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+
+  @@index([accountId, createdAt])
 }
