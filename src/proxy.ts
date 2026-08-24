@@ -2,7 +2,12 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { corsHeaders } from "@/http/cors";
 
-export function middleware(request: NextRequest) {
+/**
+ * Next 16 renamed the middleware convention to `proxy`. Same interception
+ * point: preflight is answered here so a cross-origin request never reaches a
+ * route handler without CORS headers.
+ */
+export default function proxy(request: NextRequest) {
   const origin = request.headers.get("origin");
   const headers = corsHeaders(origin);
 

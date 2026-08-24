@@ -23,6 +23,9 @@ export const RunStatusSchema = z.enum([
   "QUEUED",
   "RUNNING",
   "WAITING",
+  // Cancellation requested, worker not yet stopped. The composer renders this
+  // as "stopping" rather than pretending the run already ended.
+  "CANCELLING",
   "COMPLETED",
   "FAILED",
   "CANCELLED",
@@ -34,6 +37,61 @@ export const ToolStateSchema = z.enum([
   "COMPLETED",
   "FAILED",
   "CANCELLED",
+]);
+
+/**
+ * Closed set of renderers the UI knows how to draw.
+ *
+ * `.catch("generic")` means a tool added after the client shipped degrades to a
+ * plain card instead of failing the whole message parse — a forward-compatible
+ * default, not an accident.
+ */
+export const RendererKeySchema = z
+  .enum([
+    "image",
+    "video",
+    "audio",
+    "text",
+    "schema",
+    "skill",
+    "plan",
+    "generic",
+  ])
+  .catch("generic");
+
+/**
+ * Typed tool output. Discriminated on `type` so the renderer never inspects an
+ * open record to decide what it is looking at.
+ */
+export const ToolResultSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("image"),
+    urls: z.array(z.url()).min(1),
+    width: z.number().int().positive().nullable().default(null),
+    height: z.number().int().positive().nullable().default(null),
+    mimeType: z.string().default("image/png"),
+  }),
+  z.object({
+    type: z.literal("video"),
+    urls: z.array(z.url()).min(1),
+    durationSeconds: z.number().nonnegative().nullable().default(null),
+    mimeType: z.string().default("video/mp4"),
+  }),
+  z.object({
+    type: z.literal("audio"),
+    urls: z.array(z.url()).min(1),
+    durationSeconds: z.number().nonnegative().nullable().default(null),
+    mimeType: z.string().default("audio/mpeg"),
+  }),
+  z.object({
+    type: z.literal("text"),
+    text: z.string(),
+  }),
+  // Structured payloads with no media: schema lookups, skill loads, estimates.
+  z.object({
+    type: z.literal("data"),
+    data: z.record(z.string(), z.unknown()),
+  }),
 ]);
 
 /** Anthropic-native content blocks, stored verbatim. */
@@ -79,10 +137,10 @@ export const AssetSchema = z.object({
 export const ToolInvocationSchema = z.object({
   id: z.string(),
   toolName: z.string(),
-  rendererKey: z.string(),
+  rendererKey: RendererKeySchema,
   state: ToolStateSchema,
   sanitizedInput: z.record(z.string(), z.unknown()),
-  result: z.record(z.string(), z.unknown()).nullable(),
+  result: ToolResultSchema.nullable(),
   resultUrl: z.url().nullable(),
   /** User-safe. Internal error codes never cross this boundary. */
   userMessage: z.string().nullable(),
@@ -135,7 +193,11 @@ export const AgentRunStateSchema = z.object({
   status: RunStatusSchema,
   turns: z.number().int().nonnegative(),
   routedModel: z.string().nullable(),
+  /** User-safe explanation of a failure. Internal codes stay in the logs. */
   userMessage: z.string().nullable(),
+  /** Whether the frontend may offer a retry for this failure (Phase 3). */
+  retryable: z.boolean().default(false),
+  cancellationRequestedAt: z.iso.datetime().nullable().default(null),
   startedAt: z.iso.datetime().nullable(),
   completedAt: z.iso.datetime().nullable(),
 });

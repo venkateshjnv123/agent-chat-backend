@@ -162,6 +162,14 @@ async function failRun(payload: AgentTurnPayload, error: unknown) {
     ? "The model returned an empty response. Try sending the message again."
     : "This turn failed before it finished. You can retry it.";
 
+  // An empty stream or an upstream 429/5xx is worth retrying; a malformed
+  // request is not, and offering a retry that always fails is worse than
+  // offering none.
+  const retryable =
+    isEmptyStream ||
+    (error instanceof Error &&
+      /openrouter_http_(429|5\d\d)/.test(error.message));
+
   logger.error("turn failed", {
     chatId: payload.chatId,
     runId: payload.runId,
@@ -180,6 +188,7 @@ async function failRun(payload: AgentTurnPayload, error: unknown) {
         status: "FAILED",
         errorCode,
         userMessage,
+        retryable,
         completedAt: new Date(),
       },
     }),

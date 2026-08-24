@@ -134,6 +134,9 @@ export const assistantMessageFixture: z.infer<typeof MessageSchema> = {
       result: {
         type: "image",
         urls: ["https://example.invalid/gen/cropped.png"],
+        width: 768,
+        height: 512,
+        mimeType: "image/png",
       },
       resultUrl: "https://example.invalid/gen/cropped.png",
       userMessage: null,
@@ -165,12 +168,15 @@ export const runStateFixture: z.infer<typeof AgentRunStateSchema> = {
   turns: 2,
   routedModel: "openrouter/free",
   userMessage: null,
+  retryable: false,
+  cancellationRequestedAt: null,
   startedAt: NOW,
   completedAt: NOW,
 };
 
 export const creditBalanceFixture: z.infer<typeof CreditBalanceSchema> = {
   availableBalance: 5_000_000,
+  reservedBalance: 0,
   formatted: "5.00",
 };
 
@@ -182,6 +188,8 @@ export const ledgerListFixture: z.infer<typeof LedgerListResponseSchema> = {
       kind: "SETTLE",
       toolName: "crop_image",
       runId: "run_fixture_1",
+      toolInvocationId: "inv_fixture_1",
+      zeroRated: false,
       note: null,
       createdAt: NOW,
     },
@@ -191,6 +199,8 @@ export const ledgerListFixture: z.infer<typeof LedgerListResponseSchema> = {
       kind: "SETTLE",
       toolName: null,
       runId: "run_fixture_1",
+      toolInvocationId: null,
+      zeroRated: true,
       note: "model usage recorded at zero application credits",
       createdAt: NOW,
     },

@@ -37,6 +37,9 @@ export async function GET(
         routedModel: run.routedModel,
         // Internal errorCode stays in the logs; only the safe message ships.
         userMessage: run.userMessage,
+        retryable: run.retryable,
+        cancellationRequestedAt:
+          run.cancellationRequestedAt?.toISOString() ?? null,
         startedAt: run.startedAt?.toISOString() ?? null,
         completedAt: run.completedAt?.toISOString() ?? null,
       }),

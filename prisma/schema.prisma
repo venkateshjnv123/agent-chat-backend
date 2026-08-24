@@ -41,6 +41,9 @@ enum RunStatus {
   QUEUED
   RUNNING
   WAITING
+  // Cancellation requested, worker not yet stopped. Distinct from CANCELLED so
+  // the composer can render "stopping" instead of claiming the run has ended.
+  CANCELLING
   COMPLETED
   FAILED
   CANCELLED
@@ -156,6 +159,9 @@ model AgentRun {
   turns          Int       @default(0)
   errorCode      String?
   userMessage    String?
+  /** Whether the frontend may offer a retry for this failure (Phase 3). */
+  retryable      Boolean   @default(false)
+  cancellationRequestedAt DateTime?
   traceId        String?
   startedAt      DateTime?
   completedAt    DateTime?

@@ -12,9 +12,25 @@ export async function GET(request: Request) {
       create: { ownerId: userAccountId },
     });
 
+    // Reserved credit is held by runs that started but have not settled.
+    const reserved = await prisma.creditLedgerEntry.aggregate({
+      where: { accountId: account.id, kind: "RESERVE" },
+      _sum: { delta: true },
+    });
+    const settled = await prisma.creditLedgerEntry.aggregate({
+      where: { accountId: account.id, kind: { in: ["SETTLE", "REFUND"] } },
+      _sum: { delta: true },
+    });
+
+    const reservedBalance = Math.max(
+      0,
+      -((reserved._sum.delta ?? 0) + (settled._sum.delta ?? 0)),
+    );
+
     return jsonResponse(
       CreditBalanceSchema.parse({
         availableBalance: account.balance,
+        reservedBalance,
         formatted: formatCredits(account.balance),
       }),
       { trace },
