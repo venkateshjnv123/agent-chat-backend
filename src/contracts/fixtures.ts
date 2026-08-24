@@ -8,6 +8,10 @@ import {
   MessageSchema,
   SendMessageResponseSchema,
 } from "./chat";
+import type {
+  CancelRunResponseSchema,
+  RealtimeTokenResponseSchema,
+} from "./chat";
 import { CreditBalanceSchema, LedgerListResponseSchema } from "./credits";
 
 /**
@@ -127,7 +131,10 @@ export const assistantMessageFixture: z.infer<typeof MessageSchema> = {
         width_percent: 100,
         height_percent: 50,
       },
-      result: { type: "image", urls: ["https://example.invalid/gen/cropped.png"] },
+      result: {
+        type: "image",
+        urls: ["https://example.invalid/gen/cropped.png"],
+      },
       resultUrl: "https://example.invalid/gen/cropped.png",
       userMessage: null,
       creditUsed: 5000,
@@ -190,4 +197,17 @@ export const ledgerListFixture: z.infer<typeof LedgerListResponseSchema> = {
   ],
   nextCursor: null,
   hasMore: false,
+};
+
+export const realtimeTokenFixture: z.infer<typeof RealtimeTokenResponseSchema> =
+  {
+    runId: "run_fixture_1",
+    realtimeToken: "fixture-realtime-token",
+    expiresAt: "2026-08-25T03:00:00.000Z",
+  };
+
+export const cancelRunFixture: z.infer<typeof CancelRunResponseSchema> = {
+  runId: "run_fixture_1",
+  status: "CANCELLED",
+  cancelled: true,
 };

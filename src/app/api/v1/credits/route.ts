@@ -1,9 +1,23 @@
-import { creditBalanceFixture } from "@/contracts/fixtures";
+import { CreditBalanceSchema } from "@/contracts/credits";
+import { prisma } from "@/db/client";
+import { withAuth } from "@/http/context";
 import { jsonResponse } from "@/http/errors";
+import { formatCredits } from "@/services/credits";
 
-// STUB (PLAN.md BE-0.4). Real implementation lands in BE-2.6.
-// availableBalance is integer microcredits; the UI renders balance / 1e6.
+export async function GET(request: Request) {
+  return withAuth(request, async ({ userAccountId, trace }) => {
+    const account = await prisma.creditAccount.upsert({
+      where: { ownerId: userAccountId },
+      update: {},
+      create: { ownerId: userAccountId },
+    });
 
-export function GET() {
-  return jsonResponse(creditBalanceFixture);
+    return jsonResponse(
+      CreditBalanceSchema.parse({
+        availableBalance: account.balance,
+        formatted: formatCredits(account.balance),
+      }),
+      { trace },
+    );
+  });
 }

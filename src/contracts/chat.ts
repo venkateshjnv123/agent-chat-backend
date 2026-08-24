@@ -147,6 +147,12 @@ export const CreateChatRequestSchema = z.object({
 });
 
 export const SendMessageRequestSchema = z.object({
+  /**
+   * Omitted on a first send: the backend creates the chat in the same
+   * transaction and returns its id, so the client never pre-creates an empty
+   * chat that a failed send would leave behind.
+   */
+  chatId: z.string().optional(),
   content: z.string().min(1).max(16_000),
   /** Client-generated, reused when retrying the same logical send. */
   idempotencyKey: z.string().min(8).max(128),
@@ -174,6 +180,20 @@ export const SendMessageResponseSchema = z.object({
   realtimeToken: z.string(),
 });
 
+/** Fresh scoped realtime token, for initial mount, reload and expiry. */
+export const RealtimeTokenResponseSchema = z.object({
+  runId: z.string(),
+  realtimeToken: z.string(),
+  expiresAt: z.iso.datetime(),
+});
+
+export const CancelRunResponseSchema = z.object({
+  runId: z.string(),
+  status: RunStatusSchema,
+  /** False when the run was already terminal — cancelling twice is safe. */
+  cancelled: z.boolean(),
+});
+
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
 export type Asset = z.infer<typeof AssetSchema>;
 export type ToolInvocation = z.infer<typeof ToolInvocationSchema>;
@@ -182,3 +202,5 @@ export type ChatSummary = z.infer<typeof ChatSummarySchema>;
 export type AgentRunState = z.infer<typeof AgentRunStateSchema>;
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
 export type SendMessageResponse = z.infer<typeof SendMessageResponseSchema>;
+export type RealtimeTokenResponse = z.infer<typeof RealtimeTokenResponseSchema>;
+export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;

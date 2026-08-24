@@ -1,8 +1,54 @@
-import { ledgerListFixture } from "@/contracts/fixtures";
+import { LedgerListResponseSchema } from "@/contracts/credits";
+import { prisma } from "@/db/client";
+import { encodeCursor } from "@/db/cursor";
+import { withAuth } from "@/http/context";
 import { jsonResponse } from "@/http/errors";
 
-// STUB (PLAN.md BE-0.4). Real implementation lands in BE-2.6.
+const LIMIT = 50;
 
-export function GET() {
-  return jsonResponse(ledgerListFixture);
+export async function GET(request: Request) {
+  return withAuth(request, async ({ userAccountId, trace }) => {
+    const account = await prisma.creditAccount.findUnique({
+      where: { ownerId: userAccountId },
+    });
+
+    if (!account) {
+      return jsonResponse(
+        LedgerListResponseSchema.parse({
+          items: [],
+          nextCursor: null,
+          hasMore: false,
+        }),
+        { trace },
+      );
+    }
+
+    const rows = await prisma.creditLedgerEntry.findMany({
+      where: { accountId: account.id },
+      orderBy: { createdAt: "desc" },
+      take: LIMIT + 1,
+    });
+
+    const hasMore = rows.length > LIMIT;
+    const page = hasMore ? rows.slice(0, LIMIT) : rows;
+    const last = page.at(-1);
+
+    return jsonResponse(
+      LedgerListResponseSchema.parse({
+        items: page.map((entry) => ({
+          id: entry.id,
+          delta: entry.delta,
+          kind: entry.kind,
+          toolName: entry.toolName,
+          runId: entry.runId,
+          note: entry.note,
+          createdAt: entry.createdAt.toISOString(),
+        })),
+        nextCursor:
+          hasMore && last ? encodeCursor([last.createdAt.toISOString()]) : null,
+        hasMore,
+      }),
+      { trace },
+    );
+  });
 }

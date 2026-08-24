@@ -2,14 +2,21 @@ import { describe, expect, it } from "vitest";
 
 import {
   AgentRunStateSchema,
+  CancelRunResponseSchema,
+  RealtimeTokenResponseSchema,
   ChatListResponseSchema,
   ChatSummarySchema,
   MessageListResponseSchema,
   SendMessageResponseSchema,
 } from "@/contracts/chat";
-import { CreditBalanceSchema, LedgerListResponseSchema } from "@/contracts/credits";
+import {
+  CreditBalanceSchema,
+  LedgerListResponseSchema,
+} from "@/contracts/credits";
 import {
   assistantMessageFixture,
+  cancelRunFixture,
+  realtimeTokenFixture,
   chatFixture,
   chatListFixture,
   creditBalanceFixture,
@@ -36,6 +43,8 @@ describe("fixtures satisfy their contracts", () => {
     ["run state", AgentRunStateSchema, runStateFixture],
     ["credit balance", CreditBalanceSchema, creditBalanceFixture],
     ["ledger list", LedgerListResponseSchema, ledgerListFixture],
+    ["realtime token", RealtimeTokenResponseSchema, realtimeTokenFixture],
+    ["cancel run", CancelRunResponseSchema, cancelRunFixture],
   ])("%s", (_name, schema, fixture) => {
     expect(() => schema.parse(fixture)).not.toThrow();
   });

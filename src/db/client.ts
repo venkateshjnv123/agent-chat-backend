@@ -1,16 +1,14 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 
 import { PrismaClient } from "@/generated/prisma/client";
-import { readServerEnv } from "@/env/server";
+import { readDatabaseUrl } from "@/env/server";
 
 // Prisma 7 takes the connection through a driver adapter rather than the schema.
 // Runtime always uses the POOLED Neon URL — a serverless function per request
 // would exhaust direct connections. Migrations use DIRECT_URL via prisma.config.ts.
 function createPrismaClient(): PrismaClient {
-  const { DATABASE_URL } = readServerEnv();
-
   return new PrismaClient({
-    adapter: new PrismaPg({ connectionString: DATABASE_URL }),
+    adapter: new PrismaPg({ connectionString: readDatabaseUrl() }),
   });
 }
 

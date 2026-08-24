@@ -6,6 +6,45 @@ const optionalString = z.preprocess(
   z.string().min(1).optional(),
 );
 
+/**
+ * Narrow read for the database connection.
+ *
+ * The Prisma client is imported by every route, so validating the whole
+ * environment there would make a chat list fail because a tool provider key is
+ * absent. Infrastructure fails fast; provider keys are asserted where they are
+ * used, which also keeps the stubbed surface runnable during setup.
+ */
+export function readRequiredEnv<const K extends readonly string[]>(
+  keys: K,
+): Record<K[number], string> {
+  const missing = keys.filter((key) => !process.env[key]);
+
+  if (missing.length > 0) {
+    // Field names only. A value must never reach a log line or a response.
+    throw new Error(`Invalid server environment: ${missing.sort().join(", ")}`);
+  }
+
+  return Object.fromEntries(
+    keys.map((key) => [key, process.env[key] as string]),
+  ) as Record<K[number], string>;
+}
+
+export function readDatabaseUrl(): string {
+  return readRequiredEnv(["DATABASE_URL"]).DATABASE_URL;
+}
+
+/**
+ * CORS needs only the allowlist. Validating unrelated keys here would turn a
+ * missing provider secret into a failed preflight, which reads as a CORS bug
+ * and costs an hour to trace.
+ */
+export function readFrontendOrigins(): string[] {
+  return (process.env.FRONTEND_ORIGIN ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
 export const ServerEnvSchema = z.object({
   DATABASE_URL: z.string().min(1),
   DIRECT_URL: z.string().min(1),

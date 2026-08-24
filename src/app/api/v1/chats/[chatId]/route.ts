@@ -1,15 +1,20 @@
-import { chatFixture } from "@/contracts/fixtures";
-import { jsonResponse } from "@/http/errors";
-
-// STUB (PLAN.md BE-0.4). Real ownership guard lands in BE-0.5:
-// a chat owned by another user returns 404, never 403, so the API does not
-// leak which ids exist.
+import { findOwnedChat } from "@/auth/ownership";
+import { withAuth } from "@/http/context";
+import { errorResponse, jsonResponse } from "@/http/errors";
+import { serializeChat } from "@/services/serialize";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ chatId: string }> },
 ) {
-  const { chatId } = await context.params;
+  return withAuth(request, async ({ userAccountId, trace }) => {
+    const { chatId } = await context.params;
+    const chat = await findOwnedChat(userAccountId, chatId);
 
-  return jsonResponse({ ...chatFixture, id: chatId });
+    // A chat owned by someone else is indistinguishable from one that does not
+    // exist. 403 would confirm the id is real.
+    if (!chat) return errorResponse("NOT_FOUND", { trace });
+
+    return jsonResponse(serializeChat(chat), { trace });
+  });
 }

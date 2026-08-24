@@ -1,15 +1,46 @@
-import { runStateFixture } from "@/contracts/fixtures";
-import { jsonResponse } from "@/http/errors";
+import { findOwnedChat } from "@/auth/ownership";
+import { AgentRunStateSchema } from "@/contracts/chat";
+import { prisma } from "@/db/client";
+import { withAuth } from "@/http/context";
+import { errorResponse, jsonResponse } from "@/http/errors";
 
-// STUB (PLAN.md BE-0.4). This is the REST reconciliation endpoint the client
-// falls back to whenever realtime drops, a token expires, or a run reaches a
-// terminal state. Real implementation lands with BE-0.9.
-
+/**
+ * REST reconciliation for a run.
+ *
+ * This is the fallback the client uses whenever realtime is not trustworthy:
+ * initial mount, reconnect, token expiry, and every terminal event. Realtime is
+ * delivery; this endpoint and the message rows are the truth.
+ */
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ chatId: string; runId: string }> },
 ) {
-  const { chatId, runId } = await context.params;
+  return withAuth(request, async ({ userAccountId, trace }) => {
+    const { chatId, runId } = await context.params;
 
-  return jsonResponse({ ...runStateFixture, id: runId, chatId });
+    if (!(await findOwnedChat(userAccountId, chatId))) {
+      return errorResponse("NOT_FOUND", { trace });
+    }
+
+    const run = await prisma.agentRun.findFirst({
+      where: { id: runId, chatId },
+    });
+
+    if (!run) return errorResponse("NOT_FOUND", { trace });
+
+    return jsonResponse(
+      AgentRunStateSchema.parse({
+        id: run.id,
+        chatId: run.chatId,
+        status: run.status,
+        turns: run.turns,
+        routedModel: run.routedModel,
+        // Internal errorCode stays in the logs; only the safe message ships.
+        userMessage: run.userMessage,
+        startedAt: run.startedAt?.toISOString() ?? null,
+        completedAt: run.completedAt?.toISOString() ?? null,
+      }),
+      { trace },
+    );
+  });
 }

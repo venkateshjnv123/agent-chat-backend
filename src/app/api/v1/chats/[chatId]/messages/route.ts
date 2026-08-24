@@ -1,47 +1,95 @@
+import { findOwnedChat } from "@/auth/ownership";
 import {
   ListMessagesQuerySchema,
+  MessageListResponseSchema,
   SendMessageRequestSchema,
 } from "@/contracts/chat";
-import { messageListFixture, sendMessageFixture } from "@/contracts/fixtures";
+import { prisma } from "@/db/client";
+import { decodeSequenceCursor, encodeCursor } from "@/db/cursor";
+import { withAuth } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
-
-// STUB (PLAN.md BE-0.4). Real implementations: read in BE-0.7, send in BE-0.8.
+import { handleSend } from "@/services/send";
+import { serializeMessage } from "@/services/serialize";
 
 export async function GET(
   request: Request,
   context: { params: Promise<{ chatId: string }> },
 ) {
-  const { chatId } = await context.params;
-  const url = new URL(request.url);
+  return withAuth(request, async ({ userAccountId, trace }) => {
+    const { chatId } = await context.params;
 
-  const parsed = ListMessagesQuerySchema.safeParse({
-    cursor: url.searchParams.get("cursor") ?? undefined,
-    limit: url.searchParams.get("limit") ?? undefined,
-  });
+    if (!(await findOwnedChat(userAccountId, chatId))) {
+      return errorResponse("NOT_FOUND", { trace });
+    }
 
-  if (!parsed.success) {
-    return errorResponse("BAD_REQUEST", { issues: parsed.error.issues });
-  }
+    const url = new URL(request.url);
+    const parsed = ListMessagesQuerySchema.safeParse({
+      cursor: url.searchParams.get("cursor") ?? undefined,
+      limit: url.searchParams.get("limit") ?? undefined,
+    });
 
-  return jsonResponse({
-    ...messageListFixture,
-    items: messageListFixture.items.map((message) => ({ ...message, chatId })),
+    if (!parsed.success) {
+      return errorResponse("BAD_REQUEST", {
+        issues: parsed.error.issues,
+        trace,
+      });
+    }
+
+    const cursor = parsed.data.cursor
+      ? decodeSequenceCursor(parsed.data.cursor)
+      : null;
+
+    if (parsed.data.cursor && cursor === null) {
+      return errorResponse("BAD_REQUEST", { trace });
+    }
+
+    // Newest first, paging on the epoch-millis sequence. Never skip/take: an
+    // offset re-reads rows the client already saw when a turn lands mid-scroll.
+    const rows = await prisma.message.findMany({
+      where: {
+        chatId,
+        ...(cursor !== null ? { sequence: { lt: cursor } } : {}),
+      },
+      orderBy: { sequence: "desc" },
+      take: parsed.data.limit + 1,
+      include: { toolInvocations: { orderBy: { createdAt: "asc" } } },
+    });
+
+    const hasMore = rows.length > parsed.data.limit;
+    const page = hasMore ? rows.slice(0, parsed.data.limit) : rows;
+    const last = page.at(-1);
+
+    return jsonResponse(
+      MessageListResponseSchema.parse({
+        items: page.map(serializeMessage),
+        nextCursor:
+          hasMore && last ? encodeCursor([last.sequence.toString()]) : null,
+        hasMore,
+      }),
+      { trace },
+    );
   });
 }
 
+/**
+ * Nested send, kept for symmetry with the read route. Delegates to the same
+ * implementation as `POST /v1/messages`; the path supplies the chat id.
+ */
 export async function POST(
   request: Request,
   context: { params: Promise<{ chatId: string }> },
 ) {
-  const { chatId } = await context.params;
-  const parsed = SendMessageRequestSchema.safeParse(await request.json());
+  return withAuth(request, async (auth) => {
+    const { chatId } = await context.params;
+    const parsed = SendMessageRequestSchema.safeParse(await request.json());
 
-  if (!parsed.success) {
-    return errorResponse("BAD_REQUEST", { issues: parsed.error.issues });
-  }
+    if (!parsed.success) {
+      return errorResponse("BAD_REQUEST", {
+        issues: parsed.error.issues,
+        trace: auth.trace,
+      });
+    }
 
-  // 202: the work is accepted, not complete. No model call happens in the
-  // request path — that is what keeps this under 200ms and makes a reload
-  // mid-run recoverable.
-  return jsonResponse({ ...sendMessageFixture, chatId }, { status: 202 });
+    return handleSend(auth, { ...parsed.data, chatId });
+  });
 }
