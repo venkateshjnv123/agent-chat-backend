@@ -18,7 +18,12 @@ import {
  */
 export async function handleSend(
   context: RequestContext,
-  input: { chatId?: string; content: string; idempotencyKey: string },
+  input: {
+    chatId?: string;
+    content: string;
+    idempotencyKey: string;
+    planMode?: boolean;
+  },
 ): Promise<Response> {
   const { userAccountId, trace } = context;
 
@@ -77,6 +82,7 @@ export async function handleSend(
     assistantMessageId: accepted.assistantMessageId,
     userAccountId,
     traceId: trace,
+    planMode: input.planMode ?? false,
   });
 
   await prisma.agentRun.update({

@@ -4,9 +4,12 @@ import { runClaimedTool, type ToolExecution } from "@/tools/execute";
 
 export type MagicaToolPayload = {
   invocationId: string;
+  /** Whose credit the parent reserved, and who settlement returns it to. */
+  ownerId: string;
   nodeType: string;
   nodeInput: Record<string, unknown>;
-  /** For log correlation only; the row is the source of truth. */
+  /** Microcredits already held by the parent for this step. */
+  reserved: number;
   runId: string;
   traceId: string;
 };
@@ -41,8 +44,11 @@ export const magicaTool = task({
 
     const execution = await runClaimedTool({
       invocationId: payload.invocationId,
+      ownerId: payload.ownerId,
+      runId: payload.runId,
       nodeType: payload.nodeType,
       nodeInput: payload.nodeInput,
+      reserved: payload.reserved,
       signal,
     });
 

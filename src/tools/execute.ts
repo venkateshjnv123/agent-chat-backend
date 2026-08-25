@@ -3,10 +3,19 @@ import { prisma } from "@/db/client";
 import {
   MagicaError,
   dispatchNodeRun,
+  estimateCredits,
   getNodeRun,
   isTerminal,
+  type EstimateNode,
   type MagicaRun,
 } from "@/magica/client";
+import {
+  estimateOrFallback,
+  refundReservation,
+  reserveCredits,
+  settleCredits,
+} from "@/services/creditLedger";
+import { formatEstimate } from "@/services/credits";
 import { getTool, sanitizeInput } from "@/tools/registry";
 import { ToolOutputError, type ToolDefinition } from "@/tools/types";
 
@@ -36,6 +45,8 @@ export type ToolExecution = {
 
 export type ClaimToolCallOptions = {
   runId: string;
+  /** Whose credit pays for this step. */
+  ownerId: string;
   messageId: string | null;
   toolName: string;
   /** Provider-assigned id for this tool call; unique within the run. */
@@ -45,9 +56,13 @@ export type ClaimToolCallOptions = {
 
 export type RunClaimedToolOptions = {
   invocationId: string;
+  ownerId: string;
+  runId: string;
   nodeType: string;
   nodeInput: Record<string, unknown>;
   signal?: AbortSignal;
+  /** Microcredits held by `claimToolCall`, settled against the real charge. */
+  reserved: number;
   /** Injectable for tests; defaults to the real polling schedule. */
   poll?: PollOptions;
 };
@@ -80,8 +95,11 @@ export async function claimToolCall(options: ClaimToolCallOptions): Promise<
       invocationId: string;
       nodeType: string;
       nodeInput: Record<string, unknown>;
+      /** Microcredits held for this step; the child settles against it. */
+      reserved: number;
     }
   | { status: "settled"; execution: ToolExecution }
+  | { status: "insufficient_credits"; execution: ToolExecution }
 > {
   const definition = getTool(options.toolName);
 
@@ -119,12 +137,72 @@ export async function claimToolCall(options: ClaimToolCallOptions): Promise<
 
   if (claim.replayed) return { status: "settled", execution: claim.execution };
 
+  const nodeInput = definition.toNodeInput(parsed.data);
+
+  // Price the step with the provider, then hold that much before dispatching.
+  // Reserving after dispatch would let a user start work they cannot pay for,
+  // and Magica bills at dispatch, so this is the last moment the spend can
+  // still be refused.
+  const reserved = await reserveStep(definition, options, claim.invocationId, {
+    type: definition.nodeType,
+    data: nodeInput,
+  });
+
+  if (!reserved.ok) {
+    return {
+      status: "insufficient_credits",
+      execution: await persist(claim.invocationId, {
+        state: "FAILED",
+        errorCode: "insufficient_credits",
+        userMessage: `This step needs ${formatEstimate(reserved.required)} credits and ${formatEstimate(reserved.available)} are available.`,
+        creditUsed: 0,
+        result: null,
+        resultUrl: null,
+      }),
+    };
+  }
+
   return {
     status: "claimed",
     invocationId: claim.invocationId,
     nodeType: definition.nodeType,
-    nodeInput: definition.toNodeInput(parsed.data),
+    nodeInput,
+    reserved: reserved.reserved,
   };
+}
+
+/**
+ * Estimates and holds credit for one step.
+ *
+ * A provider that will not price the step is not a reason to fail the turn: a
+ * conservative fallback is reserved instead and settlement corrects it, which
+ * keeps a pricing blip from looking to the user like a broken tool.
+ */
+async function reserveStep(
+  definition: ToolDefinition,
+  options: ClaimToolCallOptions,
+  invocationId: string,
+  node: EstimateNode,
+): Promise<Awaited<ReturnType<typeof reserveCredits>>> {
+  let estimate: number | null = null;
+
+  try {
+    const [priced] = await estimateCredits([node]);
+
+    estimate = priced?.microcredits ?? null;
+  } catch {
+    // Logged by the client; priced by the fallback below.
+    estimate = null;
+  }
+
+  return reserveCredits({
+    ownerId: options.ownerId,
+    runId: options.runId,
+    subject: invocationId,
+    amount: estimateOrFallback(estimate),
+    toolName: definition.name,
+    note: estimate === null ? "estimate unavailable, reserved default" : null,
+  });
 }
 
 export function executionKeyFor(options: {
@@ -157,17 +235,47 @@ export async function runClaimedTool(
 
   if (!existing) throw new Error("tool_invocation_missing");
 
-  const definition = getTool(existing.toolName);
+  const { toolName } = existing;
+  const definition = getTool(toolName);
 
   if (!definition) {
-    return persist(invocationId, {
-      state: "FAILED",
-      errorCode: "unknown_tool",
-      userMessage: "That tool isn't available.",
-      creditUsed: 0,
-      result: null,
-      resultUrl: null,
-    });
+    return settle(
+      await persist(invocationId, {
+        state: "FAILED",
+        errorCode: "unknown_tool",
+        userMessage: "That tool isn't available.",
+        creditUsed: 0,
+        result: null,
+        resultUrl: null,
+      }),
+    );
+  }
+
+  async function settle(execution: ToolExecution): Promise<ToolExecution> {
+    // Settlement is keyed on the invocation, so a task retry that reaches here
+    // twice writes one settlement. A step that never dispatched gets the whole
+    // reservation back rather than a zero settlement — there is nothing to
+    // explain when no provider run existed.
+    if (execution.state === "COMPLETED" || execution.creditUsed > 0) {
+      await settleCredits({
+        ownerId: options.ownerId,
+        runId: options.runId,
+        subject: invocationId,
+        reserved: options.reserved,
+        actual: execution.creditUsed,
+        toolName,
+      });
+    } else {
+      await refundReservation({
+        ownerId: options.ownerId,
+        runId: options.runId,
+        subject: invocationId,
+        toolName,
+        note: `step ${execution.state.toLowerCase()} before it was billed`,
+      });
+    }
+
+    return execution;
   }
 
   try {
@@ -194,9 +302,9 @@ export async function runClaimedTool(
 
     const run = await pollToTerminal(externalRunId, options);
 
-    return await finish(definition, invocationId, run);
+    return await settle(await finish(definition, invocationId, run));
   } catch (error) {
-    return await fail(invocationId, error);
+    return await settle(await fail(invocationId, error));
   }
 }
 

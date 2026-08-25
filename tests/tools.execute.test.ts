@@ -49,6 +49,39 @@ const toolInvocation = {
 
 vi.mock("@/db/client", () => ({ prisma: { toolInvocation } }));
 
+/**
+ * Credit accounting is faked here and proven in its own suite.
+ *
+ * These tests are about dispatch, polling, and exactly-once execution; wiring a
+ * real ledger in would make every case depend on a balance it does not care
+ * about. What is asserted below is that the right settlement call happens for
+ * each terminal state.
+ */
+const reserveCredits = vi.fn(async () => ({
+  ok: true as const,
+  reserved: 5_000,
+  entryId: "led_1",
+  replayed: false,
+}));
+const settleCredits = vi.fn(async () => ({
+  settled: 0,
+  refunded: 0,
+  replayed: false,
+}));
+const refundReservation = vi.fn(async () => ({ refunded: 0, replayed: false }));
+
+vi.mock("@/services/creditLedger", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/services/creditLedger")>();
+
+  return {
+    ...actual,
+    reserveCredits,
+    settleCredits,
+    refundReservation,
+  };
+});
+
 const dispatchNodeRun = vi.fn();
 const getNodeRun = vi.fn();
 
@@ -58,6 +91,7 @@ vi.mock("@/magica/client", async (importOriginal) => {
   return {
     ...actual,
     dispatchNodeRun: (...args: unknown[]) => dispatchNodeRun(...args),
+    estimateCredits: async () => [{ microcredits: 5_000 }],
     getNodeRun: (...args: unknown[]) => getNodeRun(...args),
   };
 });
@@ -115,6 +149,7 @@ async function call(overrides: Record<string, unknown> = {}) {
 
   const claim = await claimToolCall({
     runId: "run_a",
+    ownerId: "user_a",
     messageId: "msg_a",
     toolName: "crop_image",
     toolCallId: "call_1",
@@ -122,12 +157,15 @@ async function call(overrides: Record<string, unknown> = {}) {
     ...claimOverrides,
   });
 
-  if (claim.status === "settled") return claim.execution;
+  if (claim.status !== "claimed") return claim.execution;
 
   return runClaimedTool({
     invocationId: claim.invocationId,
+    ownerId: "user_a",
+    runId: "run_a",
     nodeType: claim.nodeType,
     nodeInput: claim.nodeInput,
+    reserved: claim.reserved,
     signal,
     poll: poll ?? FAST_POLL,
   });
@@ -267,6 +305,7 @@ describe("executeTool", () => {
     // carries an externalRunId, and Magica has already charged for that run.
     const claim = await claimToolCall({
       runId: "run_a",
+      ownerId: "user_a",
       messageId: "msg_a",
       toolName: "crop_image",
       toolCallId: "call_1",
@@ -279,8 +318,11 @@ describe("executeTool", () => {
 
     const execution = await runClaimedTool({
       invocationId: claim.invocationId,
+      ownerId: "user_a",
+      runId: "run_a",
       nodeType: claim.nodeType,
       nodeInput: claim.nodeInput,
+      reserved: claim.reserved,
       poll: FAST_POLL,
     });
 

@@ -219,6 +219,11 @@ export const SendMessageRequestSchema = z.object({
   /** Client-generated, reused when retrying the same logical send. */
   idempotencyKey: z.string().min(8).max(128),
   attachmentIds: z.array(z.string()).max(10).optional(),
+  /**
+   * Composer plan mode. When set, a turn that wants to run tools pauses and
+   * shows its plan for approval before spending anything.
+   */
+  planMode: z.boolean().default(false),
 });
 
 export const ListMessagesQuerySchema = z.object({

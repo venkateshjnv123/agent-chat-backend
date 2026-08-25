@@ -43,8 +43,10 @@ export async function GET(request: Request) {
           runId: entry.runId,
           toolInvocationId: null,
           // Model usage is recorded at zero application credits so the turn
-          // stays auditable; only Magica tools actually bill.
-          zeroRated: entry.delta === 0,
+          // stays auditable; only Magica tools actually bill. A tool's own
+          // settle row can also be zero when the estimate was exact, so the
+          // flag keys off the absence of a tool, not off the delta.
+          zeroRated: entry.toolName === null && entry.delta === 0,
           note: entry.note,
           createdAt: entry.createdAt.toISOString(),
         })),

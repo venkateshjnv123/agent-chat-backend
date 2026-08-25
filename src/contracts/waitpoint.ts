@@ -79,6 +79,8 @@ export const ResolveWaitpointResponseSchema = z.object({
   applied: z.boolean(),
 });
 
+export type PlanResolution = z.infer<typeof PlanResolutionSchema>;
+export type PlanStep = z.infer<typeof PlanStepSchema>;
 export type PlanPayload = z.infer<typeof PlanPayloadSchema>;
 export type Waitpoint = z.infer<typeof WaitpointSchema>;
 export type ResolveWaitpointRequest = z.infer<
