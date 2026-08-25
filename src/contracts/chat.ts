@@ -267,6 +267,31 @@ export const CancelRunResponseSchema = z.object({
   cancelled: z.boolean(),
 });
 
+/**
+ * Result of asking to run a failed turn again.
+ *
+ * A retry reuses the original run and its assistant message, so the response
+ * carries the same ids the client already holds. `retried` is false when the
+ * run was not eligible or another request got there first — both are answered
+ * with 200 and the current state, because a duplicate click is not an error.
+ */
+export const RetryRunResponseSchema = z.object({
+  runId: z.string(),
+  chatId: z.string(),
+  messageId: z.string(),
+  status: RunStatusSchema,
+  retried: z.boolean(),
+  attempt: z.number().int().min(0),
+  /** Present only when a new attempt was dispatched. */
+  realtimeRunId: z.string().nullable(),
+  realtimeToken: z.string(),
+  /** Why a retry was refused, when it was. */
+  reason: z
+    .enum(["not_retryable", "run_active", "already_retried"])
+    .nullable()
+    .default(null),
+});
+
 export type RendererKey = z.infer<typeof RendererKeySchema>;
 export type ToolResult = z.infer<typeof ToolResultSchema>;
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
@@ -279,3 +304,4 @@ export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>;
 export type SendMessageResponse = z.infer<typeof SendMessageResponseSchema>;
 export type RealtimeTokenResponse = z.infer<typeof RealtimeTokenResponseSchema>;
 export type CancelRunResponse = z.infer<typeof CancelRunResponseSchema>;
+export type RetryRunResponse = z.infer<typeof RetryRunResponseSchema>;

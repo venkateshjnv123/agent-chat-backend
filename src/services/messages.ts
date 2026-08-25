@@ -1,5 +1,6 @@
 import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/db/client";
+import { reclaimStaleRun } from "@/services/staleRuns";
 
 /** Postgres raises this when a unique constraint is violated. */
 const UNIQUE_VIOLATION = "P2002";
@@ -66,6 +67,30 @@ export async function acceptMessage(input: {
     };
   }
 
+  try {
+    return await openRun(input);
+  } catch (error) {
+    // The chat may be locked by a run whose worker died. Releasing an expired
+    // lease and trying once more is the difference between a chat that
+    // recovers and one that returns 409 forever. Only once: a second failure
+    // is a real conflict, not a stale one.
+    if (error instanceof ActiveRunExistsError && input.chatId) {
+      const { reclaimed } = await reclaimStaleRun(input.chatId);
+
+      if (reclaimed) return await openRun(input);
+    }
+
+    throw error;
+  }
+}
+
+async function openRun(input: {
+  chatId?: string;
+  userAccountId: string;
+  content: string;
+  idempotencyKey: string;
+  traceId: string;
+}): Promise<SendResult> {
   try {
     return await prisma.$transaction(async (tx) => {
       // A first send creates the chat here rather than in a separate request:

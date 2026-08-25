@@ -161,6 +161,14 @@ model AgentRun {
   userMessage    String?
   /** Whether the frontend may offer a retry for this failure (Phase 3). */
   retryable      Boolean   @default(false)
+  /**
+   * Times this run has been re-dispatched. Zero for a first attempt.
+   *
+   * A retry reuses the run and its assistant message rather than creating new
+   * ones, so this counter is what makes each dispatch distinct to Trigger's
+   * idempotency without letting the same attempt be enqueued twice.
+   */
+  attempt        Int       @default(0)
   cancellationRequestedAt DateTime?
   traceId        String?
   startedAt      DateTime?

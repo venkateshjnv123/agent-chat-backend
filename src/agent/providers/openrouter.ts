@@ -6,9 +6,28 @@ import {
   type AgentTurnRequest,
   type ToolCall,
 } from "@/agent/provider";
+import {
+  DEFAULT_RETRY,
+  TransientProviderError,
+  classifyHttp,
+  withProviderRetry,
+  type RetryOptions,
+} from "@/agent/retry";
 import { readRequiredEnv } from "@/env/server";
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
+
+/** Ceiling on waiting for response headers. */
+const CONNECT_TIMEOUT_MS = 30_000;
+
+/**
+ * Ceiling on the gap between two stream frames.
+ *
+ * A total deadline would kill a long, healthy answer. What actually needs
+ * catching is a connection that was accepted and then went quiet, which a
+ * whole-request timeout only notices minutes later.
+ */
+const IDLE_TIMEOUT_MS = 60_000;
 
 /**
  * OpenRouter implementation, pinned to the free model.
@@ -21,32 +40,71 @@ const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 export class OpenRouterProvider implements AgentProvider {
   readonly name = "openrouter";
 
-  async *stream(request: AgentTurnRequest): AsyncGenerator<AgentChunk> {
+  /** Injectable so tests can drive the backoff without real delays. */
+  constructor(
+    private readonly retry: Pick<
+      RetryOptions,
+      "attempts" | "initialDelayMs" | "maxDelayMs" | "sleep"
+    > = DEFAULT_RETRY,
+  ) {}
+
+  /**
+   * Opens the stream, retrying transient refusals.
+   *
+   * Only the connect phase is retried. Once a frame has been yielded the text
+   * is already in the user's transcript, and starting again would duplicate it;
+   * a drop after that point surfaces as a failed, retryable turn instead.
+   */
+  private async open(request: AgentTurnRequest): Promise<Response> {
     const { OPENROUTER_API_KEY, OPENROUTER_MODEL } = readRequiredEnv([
       "OPENROUTER_API_KEY",
       "OPENROUTER_MODEL",
     ]);
 
-    const response = await fetch(ENDPOINT, {
-      method: "POST",
-      signal: request.signal,
-      headers: {
-        authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        "content-type": "application/json",
+    return withProviderRetry(
+      async () => {
+        const response = await fetch(ENDPOINT, {
+          method: "POST",
+          signal: withTimeout(request.signal, CONNECT_TIMEOUT_MS),
+          headers: {
+            authorization: `Bearer ${OPENROUTER_API_KEY}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            model: OPENROUTER_MODEL,
+            stream: true,
+            messages: request.messages.map(toWireMessage),
+            ...(request.tools?.length ? { tools: request.tools } : {}),
+          }),
+        });
+
+        if (!response.ok) {
+          // Read the body before classifying: the status alone does not say
+          // whether a 400 was our malformed request or the provider's quota.
+          throw classifyHttp(
+            response.status,
+            await response.text().catch(() => ""),
+          );
+        }
+
+        if (!response.body) {
+          throw new TransientProviderError(
+            "openrouter_no_body",
+            response.status,
+          );
+        }
+
+        return response;
       },
-      body: JSON.stringify({
-        model: OPENROUTER_MODEL,
-        stream: true,
-        messages: request.messages.map(toWireMessage),
-        ...(request.tools?.length ? { tools: request.tools } : {}),
-      }),
-    });
+      { ...this.retry, signal: request.signal },
+    );
+  }
 
-    if (!response.ok || !response.body) {
-      throw new Error(`openrouter_http_${response.status}`);
-    }
+  async *stream(request: AgentTurnRequest): AsyncGenerator<AgentChunk> {
+    const response = await this.open(request);
+    const body = response.body!;
 
-    const reader = response.body.getReader();
+    const reader = body.getReader();
     const decoder = new TextDecoder();
 
     let buffer = "";
@@ -63,7 +121,7 @@ export class OpenRouterProvider implements AgentProvider {
     let usage: { inputTokens: number; outputTokens: number } | null = null;
 
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithIdleTimeout(reader);
 
       if (done) break;
 
@@ -217,3 +275,46 @@ type OpenRouterFrame = {
     };
   }[];
 };
+
+/**
+ * Combines the caller's cancellation with a deadline.
+ *
+ * `AbortSignal.any` keeps the two reasons distinct: an abort from the stop
+ * button is a cancelled run, a `TimeoutError` is a transient provider failure,
+ * and the retry layer has to be able to tell them apart.
+ */
+function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {
+  const deadline = AbortSignal.timeout(ms);
+
+  return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
+
+/**
+ * Reads one chunk, failing if the connection goes quiet.
+ *
+ * A stalled read is indistinguishable from a slow model at the socket level, so
+ * the gap between frames is what gets the deadline rather than the request as a
+ * whole. Racing the timer leaves the read pending, which is fine: the reader is
+ * discarded with the response when the generator unwinds.
+ */
+async function readWithIdleTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): Promise<{ done: boolean; value?: Uint8Array }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("openrouter_stream_idle");
+
+          error.name = "TimeoutError";
+          reject(error);
+        }, IDLE_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}

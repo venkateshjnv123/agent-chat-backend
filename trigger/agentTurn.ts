@@ -7,6 +7,7 @@ import {
 } from "@/agent/provider";
 import { buildSystemPrompt } from "@/agent/prompt";
 import { OpenRouterProvider } from "@/agent/providers/openrouter";
+import { PermanentProviderError, TransientProviderError } from "@/agent/retry";
 import { agentToolSchemas } from "@/agent/tools";
 import { prisma } from "@/db/client";
 import { estimateCredits } from "@/magica/client";
@@ -36,6 +37,10 @@ export type AgentTurnPayload = {
   traceId: string;
   /** Composer plan mode: pause for approval before the first tool runs. */
   planMode?: boolean;
+  /** Zero on the first dispatch; incremented by an explicit retry. */
+  attempt?: number;
+  /** Client session, mirrored from `x-session-id` so logs join up. */
+  sessionId?: string | null;
 };
 
 /**
@@ -70,6 +75,8 @@ export const agentTurn = task({
         runId: payload.runId,
         messageId: payload.assistantMessageId,
         traceId: payload.traceId,
+        sessionId: payload.sessionId ?? null,
+        attempt: payload.attempt ?? 0,
         ...extra,
       });
 
@@ -104,6 +111,10 @@ export const agentTurn = task({
       let routedModel: string | null = null;
       let usage: { inputTokens: number; outputTokens: number } | null = null;
       let turns = 0;
+      // Set when the loop stops because it ran out of turns rather than because
+      // the model was finished. The distinction is the whole point of 3.5: a
+      // capped turn keeps its partial output and says why it stopped.
+      let exhausted = false;
       // Approval covers the run, not each batch: a user who approved a plan
       // should not be asked again for the follow-up step it described.
       let planApproved = !payload.planMode;
@@ -205,9 +216,24 @@ export const agentTurn = task({
         }
 
         if (signal?.aborted) break;
+
+        if (turns === MAX_TURNS) exhausted = true;
       }
 
       const cancelled = signal?.aborted ?? false;
+
+      // The ceiling is reported in the transcript, not just in a log. A turn
+      // that silently stops mid-plan reads to the user as the model giving up.
+      if (exhausted && !cancelled) {
+        const notice =
+          `I stopped after ${MAX_TURNS} steps without finishing. ` +
+          "Everything above already ran. Send a follow-up to continue from here.";
+
+        blocks.push({ type: "text", text: notice });
+        text += (text ? "\n\n" : "") + notice;
+
+        log("max turns reached", { turns });
+      }
 
       // OpenRouter Free costs us nothing, but a turn with no ledger entry looks
       // like a turn that did no work. The zero-delta row is where our decision
@@ -236,7 +262,11 @@ export const agentTurn = task({
             aiModel: routedModel
               ? { id: routedModel, name: routedModel, provider: "openrouter" }
               : undefined,
-            metadata: { turns, thinkingDurationSeconds: null },
+            metadata: {
+              turns,
+              maxTurnsReached: exhausted,
+              thinkingDurationSeconds: null,
+            },
           },
         }),
         prisma.agentRun.update({
@@ -245,6 +275,13 @@ export const agentTurn = task({
             status: cancelled ? "CANCELLED" : "COMPLETED",
             routedModel,
             turns,
+            // A capped run completed — it produced real output — but it is
+            // retryable, and the code is what lets the UI say so.
+            errorCode: exhausted ? "max_turns_reached" : null,
+            userMessage: exhausted
+              ? `This turn hit the ${MAX_TURNS}-step limit before finishing.`
+              : null,
+            retryable: exhausted,
             completedAt: new Date(),
           },
         }),
@@ -630,17 +667,20 @@ async function failRun(payload: AgentTurnPayload, error: unknown) {
       ? error.message.slice(0, 120)
       : "unknown_error";
 
-  const userMessage = isEmptyStream
-    ? "The model returned an empty response. Try sending the message again."
-    : "This turn failed before it finished. You can retry it.";
-
-  // An empty stream or an upstream 429/5xx is worth retrying; a malformed
-  // request is not, and offering a retry that always fails is worse than
-  // offering none.
+  // Retryability comes from the provider layer's own classification rather than
+  // from matching on message text here. Offering a retry that is certain to
+  // fail the same way is worse than offering none, and the layer that made the
+  // request is the one that knows which it was.
   const retryable =
     isEmptyStream ||
-    (error instanceof Error &&
-      /openrouter_http_(429|5\d\d)/.test(error.message));
+    (error instanceof TransientProviderError &&
+      !(error instanceof PermanentProviderError));
+
+  const userMessage = isEmptyStream
+    ? "The model returned an empty response. Try sending the message again."
+    : retryable
+      ? "The model provider was unavailable. You can retry this turn."
+      : "This turn failed before it finished.";
 
   logger.error("turn failed", {
     chatId: payload.chatId,

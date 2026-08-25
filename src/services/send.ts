@@ -25,7 +25,7 @@ export async function handleSend(
     planMode?: boolean;
   },
 ): Promise<Response> {
-  const { userAccountId, trace } = context;
+  const { userAccountId, trace, sessionId } = context;
 
   let accepted;
 
@@ -82,6 +82,7 @@ export async function handleSend(
     assistantMessageId: accepted.assistantMessageId,
     userAccountId,
     traceId: trace,
+    sessionId,
     planMode: input.planMode ?? false,
   });
 

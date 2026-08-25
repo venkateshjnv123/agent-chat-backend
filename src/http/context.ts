@@ -6,7 +6,27 @@ export type RequestContext = {
   userAccountId: string;
   clerkUserId: string;
   trace: string;
+  /**
+   * The client's own session id, mirrored from `x-session-id`.
+   *
+   * It is echoed into logs and into the Trigger payload so one browser tab's
+   * whole story — several requests, several runs — can be followed without
+   * correlating timestamps. It is client-supplied and therefore never trusted
+   * for anything but correlation.
+   */
+  sessionId: string | null;
 };
+
+/** Client-supplied, so it is length-capped and stripped of control characters. */
+function readSessionId(request: Request): string | null {
+  const raw = request.headers.get("x-session-id");
+
+  if (!raw) return null;
+
+  const cleaned = raw.replace(/[^\w.:-]/g, "").slice(0, 128);
+
+  return cleaned.length > 0 ? cleaned : null;
+}
 
 type Handler<T> = (context: RequestContext) => Promise<T>;
 
@@ -22,6 +42,7 @@ export async function withAuth(
   handler: Handler<Response>,
 ): Promise<Response> {
   const trace = traceId();
+  const sessionId = readSessionId(request);
 
   let user;
 
@@ -34,6 +55,7 @@ export async function withAuth(
       JSON.stringify({
         level: "error",
         traceId: trace,
+        sessionId,
         message: error instanceof Error ? error.message : "auth misconfigured",
       }),
     );
@@ -52,12 +74,14 @@ export async function withAuth(
       userAccountId: account.id,
       clerkUserId: user.clerkUserId,
       trace,
+      sessionId,
     });
   } catch (error) {
     console.error(
       JSON.stringify({
         level: "error",
         traceId: trace,
+        sessionId,
         clerkUserId: user.clerkUserId,
         message: error instanceof Error ? error.message : "unknown error",
       }),

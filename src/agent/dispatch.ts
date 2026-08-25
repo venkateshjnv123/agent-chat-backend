@@ -19,6 +19,15 @@ export type Dispatch = {
 export async function dispatchAgentTurn(
   payload: AgentTurnPayload,
 ): Promise<Dispatch> {
+  // Attempt 0 keys on the run id alone so the original send keeps the exact
+  // idempotency it has always had; a retry has to look different to Trigger or
+  // the platform swallows the dispatch and reports success for work that never
+  // ran.
+  const idempotencyKey =
+    payload.attempt && payload.attempt > 0
+      ? `${payload.runId}:attempt:${payload.attempt}`
+      : payload.runId;
+
   // Asserted here rather than at startup so the rest of the API stays usable
   // while the Trigger project is still being provisioned.
   readRequiredEnv(["TRIGGER_SECRET_KEY"]);
@@ -28,9 +37,9 @@ export async function dispatchAgentTurn(
   >(
     "agent-turn",
     payload,
-    // Trigger's own idempotency, on top of our unique constraint: a retried
-    // dispatch of the same run must not enqueue a second execution.
-    { idempotencyKey: payload.runId },
+    // Trigger's own idempotency, on top of our unique constraint: a redelivered
+    // dispatch of the same attempt must not enqueue a second execution.
+    { idempotencyKey },
   );
 
   const { realtimeToken, expiresAt } = await mintRealtimeToken(handle.id);
