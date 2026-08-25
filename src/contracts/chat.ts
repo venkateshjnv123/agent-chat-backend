@@ -232,19 +232,25 @@ export const ChatListResponseSchema = paginated(ChatSummarySchema);
 export const MessageListResponseSchema = paginated(MessageSchema);
 
 /**
- * The send envelope. Mirrors the reference product field for field; we return
- * 202 rather than their 200 because the work is accepted, not completed.
+ * The send envelope. Adds realtimeRunId to the reference shape because our
+ * internal run id and Trigger.dev subscription id are intentionally distinct.
  */
 export const SendMessageResponseSchema = z.object({
   chatId: z.string(),
   messageId: z.string(),
+  /** Internal AgentRun id used by our REST reconciliation/cancel routes. */
   runId: z.string(),
+  /** Trigger.dev run id used only by the realtime subscription hook. */
+  realtimeRunId: z.string().nullable(),
   realtimeToken: z.string(),
 });
 
 /** Fresh scoped realtime token, for initial mount, reload and expiry. */
 export const RealtimeTokenResponseSchema = z.object({
+  /** Internal AgentRun id used by our REST reconciliation/cancel routes. */
   runId: z.string(),
+  /** Trigger.dev run id covered by realtimeToken. */
+  realtimeRunId: z.string(),
   realtimeToken: z.string(),
   expiresAt: z.iso.datetime(),
 });

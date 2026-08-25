@@ -158,6 +158,7 @@ export const sendMessageFixture: z.infer<typeof SendMessageResponseSchema> = {
   chatId: chatFixture.id,
   messageId: "msg_fixture_new",
   runId: "run_fixture_new",
+  realtimeRunId: "run_trigger_fixture",
   realtimeToken: "fixture-realtime-token",
 };
 
@@ -212,6 +213,7 @@ export const ledgerListFixture: z.infer<typeof LedgerListResponseSchema> = {
 export const realtimeTokenFixture: z.infer<typeof RealtimeTokenResponseSchema> =
   {
     runId: "run_fixture_1",
+    realtimeRunId: "run_trigger_fixture",
     realtimeToken: "fixture-realtime-token",
     expiresAt: "2026-08-25T03:00:00.000Z",
   };

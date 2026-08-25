@@ -37,6 +37,7 @@ export async function POST(
     return jsonResponse(
       RealtimeTokenResponseSchema.parse({
         runId: run.id,
+        realtimeRunId: run.triggerRunId,
         realtimeToken,
         expiresAt: expiresAt.toISOString(),
       }),

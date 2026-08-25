@@ -16,7 +16,8 @@ export function corsHeaders(origin: string | null): Record<string, string> {
     "access-control-allow-origin": origin,
     "access-control-allow-credentials": "true",
     "access-control-allow-methods": "GET,POST,PATCH,DELETE,OPTIONS",
-    "access-control-allow-headers": "authorization,content-type,x-trace-id",
+    "access-control-allow-headers":
+      "authorization,content-type,idempotency-key,x-trace-id",
     "access-control-max-age": "86400",
     vary: "origin",
   };
