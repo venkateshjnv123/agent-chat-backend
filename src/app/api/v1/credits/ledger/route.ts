@@ -1,15 +1,51 @@
-import { LedgerListResponseSchema } from "@/contracts/credits";
+import {
+  LedgerListResponseSchema,
+  LedgerQuerySchema,
+} from "@/contracts/credits";
 import { prisma } from "@/db/client";
-import { encodeCursor } from "@/db/cursor";
+import { decodeCursor, encodeCursor } from "@/db/cursor";
 import { withAuth } from "@/http/context";
-import { jsonResponse } from "@/http/errors";
+import { errorResponse, jsonResponse } from "@/http/errors";
 
-const LIMIT = 50;
+/**
+ * The credit ledger, newest first.
+ *
+ * Paged on `(createdAt, id)` rather than `createdAt` alone: entries for one
+ * operation are written inside a single transaction and share a timestamp to
+ * the microsecond, so a cursor on the timestamp alone would drop or repeat rows
+ * exactly at a page boundary — which is where a reserve/settle/refund triple
+ * would land.
+ */
+function decodeLedgerCursor(
+  cursor: string,
+): { createdAt: Date; id: string } | null {
+  const parts = decodeCursor(cursor);
+
+  if (!parts || parts.length !== 2) return null;
+
+  const createdAt = new Date(parts[0]);
+
+  return Number.isNaN(createdAt.getTime()) ? null : { createdAt, id: parts[1] };
+}
 
 export async function GET(request: Request) {
   return withAuth(request, async ({ userAccountId, trace }) => {
+    const url = new URL(request.url);
+    const query = LedgerQuerySchema.safeParse(
+      Object.fromEntries(url.searchParams),
+    );
+
+    if (!query.success) {
+      return errorResponse("BAD_REQUEST", {
+        issues: query.error.issues,
+        trace,
+      });
+    }
+
+    const { limit } = query.data;
     const account = await prisma.creditAccount.findUnique({
       where: { ownerId: userAccountId },
+      select: { id: true },
     });
 
     if (!account) {
@@ -23,14 +59,39 @@ export async function GET(request: Request) {
       );
     }
 
+    let after: { createdAt: Date; id: string } | null = null;
+
+    if (query.data.cursor) {
+      after = decodeLedgerCursor(query.data.cursor);
+
+      // A cursor we cannot read is a client bug, not an empty page. Silently
+      // restarting from the top would loop the list forever.
+      if (!after) {
+        return errorResponse("BAD_REQUEST", {
+          message: "That page cursor isn't valid.",
+          trace,
+        });
+      }
+    }
+
     const rows = await prisma.creditLedgerEntry.findMany({
-      where: { accountId: account.id },
-      orderBy: { createdAt: "desc" },
-      take: LIMIT + 1,
+      where: {
+        accountId: account.id,
+        ...(after
+          ? {
+              OR: [
+                { createdAt: { lt: after.createdAt } },
+                { createdAt: after.createdAt, id: { lt: after.id } },
+              ],
+            }
+          : {}),
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: limit + 1,
     });
 
-    const hasMore = rows.length > LIMIT;
-    const page = hasMore ? rows.slice(0, LIMIT) : rows;
+    const hasMore = rows.length > limit;
+    const page = hasMore ? rows.slice(0, limit) : rows;
     const last = page.at(-1);
 
     return jsonResponse(
@@ -51,7 +112,9 @@ export async function GET(request: Request) {
           createdAt: entry.createdAt.toISOString(),
         })),
         nextCursor:
-          hasMore && last ? encodeCursor([last.createdAt.toISOString()]) : null,
+          hasMore && last
+            ? encodeCursor([last.createdAt.toISOString(), last.id])
+            : null,
         hasMore,
       }),
       { trace },
