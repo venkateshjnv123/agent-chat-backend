@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --use-system-ca ./node_modules/next/dist/bin/next dev --port 3001",
-    "build": "node --use-system-ca ./node_modules/next/dist/bin/next build",
+    "build": "prisma generate && node --use-system-ca ./node_modules/next/dist/bin/next build",
     "start": "node --use-system-ca ./node_modules/next/dist/bin/next start --port 3001",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
