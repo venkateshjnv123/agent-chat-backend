@@ -52,7 +52,10 @@ export async function GET(
       },
       orderBy: { sequence: "desc" },
       take: parsed.data.limit + 1,
-      include: { toolInvocations: { orderBy: { createdAt: "asc" } } },
+      include: {
+        attachments: { orderBy: { order: "asc" } },
+        toolInvocations: { orderBy: { createdAt: "asc" } },
+      },
     });
 
     const hasMore = rows.length > parsed.data.limit;

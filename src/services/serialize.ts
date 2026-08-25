@@ -1,4 +1,5 @@
 import type {
+  Attachment as AttachmentRow,
   Chat,
   Message,
   ToolInvocation as ToolInvocationRow,
@@ -10,6 +11,7 @@ import {
   MessageSchema,
   ToolInvocationSchema,
 } from "@/contracts/chat";
+import { AttachmentSchema } from "@/contracts/attachments";
 import { z } from "zod";
 
 /**
@@ -45,7 +47,10 @@ export function serializeToolInvocation(invocation: ToolInvocationRow) {
 }
 
 export function serializeMessage(
-  message: Message & { toolInvocations?: ToolInvocationRow[] },
+  message: Message & {
+    attachments?: AttachmentRow[];
+    toolInvocations?: ToolInvocationRow[];
+  },
 ) {
   return MessageSchema.parse({
     id: message.id,
@@ -60,6 +65,21 @@ export function serializeMessage(
       message.contentBlocks,
     ),
     assets: parseOrNull(z.array(AssetSchema), message.assets),
+    attachments: (message.attachments ?? []).map((attachment) =>
+      AttachmentSchema.parse({
+        id: attachment.id,
+        status: attachment.status,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        fileSize: attachment.fileSize,
+        width: attachment.width,
+        height: attachment.height,
+        url: attachment.resultUrl,
+        order: attachment.order,
+        createdAt: attachment.createdAt.toISOString(),
+        userMessage: null,
+      }),
+    ),
     runId: message.runId,
     creditUsed: message.creditUsed,
     tokenUsage: message.tokenUsage ?? null,

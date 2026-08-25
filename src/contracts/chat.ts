@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { paginated } from "./common";
+import { AttachmentSchema } from "./attachments";
 
 /**
  * Message sequence is epoch millis, monotonic per chat. It is the pagination
@@ -157,6 +158,8 @@ export const MessageSchema = z.object({
   content: z.string(),
   contentBlocks: z.array(ContentBlockSchema).nullable(),
   assets: z.array(AssetSchema).nullable(),
+  /** User-provided images, ordered as attached in composer. */
+  attachments: z.array(AttachmentSchema).default([]),
   sequence: SequenceSchema,
   runId: z.string().nullable(),
   creditUsed: z.number().int().nonnegative(),

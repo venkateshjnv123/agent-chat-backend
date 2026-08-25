@@ -59,6 +59,7 @@ export const userMessageFixture: z.infer<typeof MessageSchema> = {
   content: "Crop this image to the top half.",
   contentBlocks: null,
   assets: null,
+  attachments: [],
   sequence: "1787591934048",
   runId: "run_fixture_1",
   creditUsed: 0,
@@ -90,6 +91,7 @@ export const assistantMessageFixture: z.infer<typeof MessageSchema> = {
     },
     { type: "text", text: "Done — here is the cropped image:" },
   ],
+  attachments: [],
   assets: [
     {
       type: "image",
