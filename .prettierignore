@@ -1,0 +1,11 @@
+# Generated Prisma client.
+src/generated/
+
+# Trigger.dev CLI build output and run state.
+.trigger/
+
+# Lockfiles are owned by pnpm.
+pnpm-lock.yaml
+
+.next/
+node_modules/

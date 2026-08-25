@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Trigger.dev CLI build output: bundled vendor code, not ours to lint.
+    ".trigger/**",
+    // Prisma's generated client.
+    "src/generated/**",
   ]),
 ]);
 

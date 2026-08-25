@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
+    "dev": "node --use-system-ca ./node_modules/next/dist/bin/next dev --port 3001",
+    "build": "node --use-system-ca ./node_modules/next/dist/bin/next build",
+    "start": "node --use-system-ca ./node_modules/next/dist/bin/next start --port 3001",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -18,7 +18,10 @@
     "db:validate": "prisma validate",
     "db:migrate": "prisma migrate dev",
     "contracts:sync": "node scripts/sync-contracts.mjs",
-    "contracts:check": "node scripts/sync-contracts.mjs --check"
+    "contracts:check": "node scripts/sync-contracts.mjs --check",
+    "trigger:login": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 login",
+    "trigger:dev": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 dev",
+    "trigger:deploy": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 deploy"
   },
   "dependencies": {
     "@clerk/backend": "^3.16.10",
