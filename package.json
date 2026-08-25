@@ -19,6 +19,8 @@
     "db:migrate": "prisma migrate dev",
     "contracts:sync": "node scripts/sync-contracts.mjs",
     "contracts:check": "node scripts/sync-contracts.mjs --check",
+    "tools:generate": "node scripts/generate-tool-schemas.mjs",
+    "tools:check": "node scripts/generate-tool-schemas.mjs --check",
     "trigger:login": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 login",
     "trigger:dev": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 dev",
     "trigger:deploy": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 deploy"
@@ -42,6 +44,7 @@
     "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^9",
     "eslint-config-next": "16.3.2",
+    "pdf-parse": "^2.4.5",
     "prettier": "^3.9.6",
     "prisma": "^7.9.1",
     "typescript": "^5",

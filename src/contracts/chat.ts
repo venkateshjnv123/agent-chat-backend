@@ -262,6 +262,8 @@ export const CancelRunResponseSchema = z.object({
   cancelled: z.boolean(),
 });
 
+export type RendererKey = z.infer<typeof RendererKeySchema>;
+export type ToolResult = z.infer<typeof ToolResultSchema>;
 export type ContentBlock = z.infer<typeof ContentBlockSchema>;
 export type Asset = z.infer<typeof AssetSchema>;
 export type ToolInvocation = z.infer<typeof ToolInvocationSchema>;
