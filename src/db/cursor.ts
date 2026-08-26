@@ -1,7 +1,7 @@
 /**
  * Cursors are opaque to the client and encode the sort key we actually page on.
  *
- * Chats page on (updatedAt, id); messages page on the epoch-millis sequence.
+ * Chats page on (pinned, updatedAt, id); messages page on the epoch-millis sequence.
  * Neither uses skip/take — an offset re-reads rows the user already saw when
  * anything is inserted mid-scroll.
  */
@@ -33,12 +33,27 @@ export function decodeSequenceCursor(cursor: string): bigint | null {
 
 export function decodeChatCursor(
   cursor: string,
-): { updatedAt: Date; id: string } | null {
+): { pinned: boolean; updatedAt: Date; id: string } | null {
   const parts = decodeCursor(cursor);
 
-  if (!parts || parts.length !== 2) return null;
+  // Two-part cursors were issued before pinning existed. Every existing chat
+  // was unpinned at migration time, so treating those as `false` preserves an
+  // in-flight page across deployment instead of forcing the client to restart.
+  if (parts?.length === 2) {
+    const updatedAt = new Date(parts[0]);
 
-  const updatedAt = new Date(parts[0]);
+    return Number.isNaN(updatedAt.getTime())
+      ? null
+      : { pinned: false, updatedAt, id: parts[1] };
+  }
 
-  return Number.isNaN(updatedAt.getTime()) ? null : { updatedAt, id: parts[1] };
+  if (!parts || parts.length !== 3) return null;
+
+  if (parts[0] !== "0" && parts[0] !== "1") return null;
+
+  const updatedAt = new Date(parts[1]);
+
+  return Number.isNaN(updatedAt.getTime())
+    ? null
+    : { pinned: parts[0] === "1", updatedAt, id: parts[2] };
 }

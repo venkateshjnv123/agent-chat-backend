@@ -27,6 +27,6 @@ export async function resolveUserAccount(clerkUserId: string) {
  */
 export async function findOwnedChat(userAccountId: string, chatId: string) {
   return prisma.chat.findFirst({
-    where: { id: chatId, userId: userAccountId },
+    where: { id: chatId, userId: userAccountId, deletedAt: null },
   });
 }

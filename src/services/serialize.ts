@@ -24,6 +24,7 @@ export function serializeChat(chat: Chat) {
     id: chat.id,
     title: chat.title,
     modelId: chat.modelId,
+    pinned: chat.pinned,
     createdAt: chat.createdAt.toISOString(),
     updatedAt: chat.updatedAt.toISOString(),
   });

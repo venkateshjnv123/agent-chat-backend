@@ -15,10 +15,19 @@ describe("cursors", () => {
 
   it("round-trips a chat position", () => {
     const updatedAt = "2026-08-25T02:00:00.000Z";
-    const decoded = decodeChatCursor(encodeCursor([updatedAt, "chat_1"]));
+    const decoded = decodeChatCursor(encodeCursor([1, updatedAt, "chat_1"]));
 
     expect(decoded?.id).toBe("chat_1");
+    expect(decoded?.pinned).toBe(true);
     expect(decoded?.updatedAt.toISOString()).toBe(updatedAt);
+  });
+
+  it("keeps old unpinned chat cursors valid across the pin migration", () => {
+    const decoded = decodeChatCursor(
+      encodeCursor(["2026-08-25T02:00:00.000Z", "chat_1"]),
+    );
+
+    expect(decoded?.pinned).toBe(false);
   });
 
   it("rejects a malformed cursor rather than paging from the start", () => {

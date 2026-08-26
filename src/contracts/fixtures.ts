@@ -32,6 +32,7 @@ export const chatFixture: z.infer<typeof ChatSummarySchema> = {
   id: "chat_fixture_1",
   title: "Illustrating data pagination",
   modelId: "openrouter/free",
+  pinned: false,
   createdAt: NOW,
   updatedAt: NOW,
 };
@@ -43,6 +44,7 @@ export const chatListFixture: z.infer<typeof ChatListResponseSchema> = {
       id: "chat_fixture_2",
       title: "Video concept for a happy dog",
       modelId: "openrouter/free",
+      pinned: true,
       createdAt: NOW,
       updatedAt: NOW,
     },

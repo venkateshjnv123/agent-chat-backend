@@ -1,6 +1,7 @@
 import {
   ChatListResponseSchema,
   CreateChatRequestSchema,
+  ListChatsQuerySchema,
 } from "@/contracts/chat";
 import { prisma } from "@/db/client";
 import { decodeChatCursor, encodeCursor } from "@/db/cursor";
@@ -13,7 +14,18 @@ const DEFAULT_LIMIT = 30;
 export async function GET(request: Request) {
   return withAuth(request, async ({ userAccountId, trace }) => {
     const url = new URL(request.url);
-    const rawCursor = url.searchParams.get("cursor");
+    const query = ListChatsQuerySchema.safeParse(
+      Object.fromEntries(url.searchParams),
+    );
+
+    if (!query.success) {
+      return errorResponse("BAD_REQUEST", {
+        issues: query.error.issues,
+        trace,
+      });
+    }
+
+    const rawCursor = query.data.cursor;
     const cursor = rawCursor ? decodeChatCursor(rawCursor) : null;
 
     if (rawCursor && !cursor) {
@@ -24,16 +36,48 @@ export async function GET(request: Request) {
     const rows = await prisma.chat.findMany({
       where: {
         userId: userAccountId,
-        ...(cursor
+        deletedAt: null,
+        ...(query.data.q
           ? {
               OR: [
-                { updatedAt: { lt: cursor.updatedAt } },
-                { updatedAt: cursor.updatedAt, id: { lt: cursor.id } },
+                {
+                  title: { contains: query.data.q, mode: "insensitive" },
+                },
+                {
+                  messages: {
+                    some: {
+                      content: {
+                        contains: query.data.q,
+                        mode: "insensitive",
+                      },
+                    },
+                  },
+                },
+              ],
+            }
+          : {}),
+        ...(cursor
+          ? {
+              AND: [
+                {
+                  OR: [
+                    ...(cursor.pinned ? [{ pinned: false }] : []),
+                    {
+                      pinned: cursor.pinned,
+                      updatedAt: { lt: cursor.updatedAt },
+                    },
+                    {
+                      pinned: cursor.pinned,
+                      updatedAt: cursor.updatedAt,
+                      id: { lt: cursor.id },
+                    },
+                  ],
+                },
               ],
             }
           : {}),
       },
-      orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+      orderBy: [{ pinned: "desc" }, { updatedAt: "desc" }, { id: "desc" }],
       take: DEFAULT_LIMIT + 1,
     });
 
@@ -46,7 +90,11 @@ export async function GET(request: Request) {
         items: page.map(serializeChat),
         nextCursor:
           hasMore && last
-            ? encodeCursor([last.updatedAt.toISOString(), last.id])
+            ? encodeCursor([
+                last.pinned ? 1 : 0,
+                last.updatedAt.toISOString(),
+                last.id,
+              ])
             : null,
         hasMore,
       }),

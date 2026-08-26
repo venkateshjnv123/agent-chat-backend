@@ -108,6 +108,11 @@ model Chat {
   userId    String
   title     String?
   modelId   String   @default("openrouter/free")
+  /// Favourited chats sort above the rest without leaving the same cursor.
+  pinned    Boolean  @default(false)
+  /// Soft delete. A chat still owns runs, ledger rows and attachments, so it is
+  /// hidden rather than removed and the audit trail stays intact.
+  deletedAt DateTime?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -117,6 +122,8 @@ model Chat {
   attachments Attachment[]
 
   @@index([userId, updatedAt, id])
+  /// Covers the default list, which orders pinned chats first.
+  @@index([userId, pinned, updatedAt, id])
 }
 
 model Message {

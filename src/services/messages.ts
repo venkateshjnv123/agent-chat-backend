@@ -201,7 +201,7 @@ async function requireOwnedChat(
   chatId: string,
 ): Promise<string> {
   const chat = await tx.chat.findFirst({
-    where: { id: chatId, userId: userAccountId },
+    where: { id: chatId, userId: userAccountId, deletedAt: null },
     select: { id: true },
   });
 
