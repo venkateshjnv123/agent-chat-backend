@@ -31,9 +31,10 @@ export type MagicaToolPayload = {
  */
 export const magicaTool = task({
   id: "magica-tool",
-  // Well past the slowest observed run (a two-clip merge takes ~110s) without
-  // letting a wedged provider run hold a machine indefinitely.
-  maxDuration: 900,
+  // Video generation and multi-clip merges can legitimately exceed ten
+  // minutes under provider load. Keep this above the polling deadline so the
+  // child can persist a clean timeout instead of being killed mid-settlement.
+  maxDuration: 20 * 60,
   retry: { maxAttempts: 1 },
   run: async (
     payload: MagicaToolPayload,

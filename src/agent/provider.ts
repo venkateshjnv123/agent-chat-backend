@@ -25,6 +25,7 @@ export type AgentMessage =
 
 export type AgentChunk =
   | { type: "text"; text: string }
+  | { type: "reasoning"; text: string }
   | {
       type: "done";
       routedModel: string | null;

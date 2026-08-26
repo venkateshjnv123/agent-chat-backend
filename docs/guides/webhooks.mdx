@@ -1,0 +1,21 @@
+---
+title: "Webhooks"
+description: "Availability and planned lifecycle event contract."
+---
+
+## Current availability
+
+Outbound developer webhooks are not enabled in this submission build. The production first-party client uses Trigger.dev Realtime for low-latency delivery and REST reconciliation for durable state.
+
+Do not configure a webhook endpoint expecting lifecycle deliveries from the current deployment.
+
+## Planned event surface
+
+The external API design reserves these signed lifecycle events:
+
+- `agent.started`
+- `agent.completed`
+- `agent.failed`
+- `tool.completed`
+
+A production webhook release would include a stable event ID, delivery timestamp, event type, owner-scoped resource IDs, and an HMAC signature. Consumers would deduplicate by event ID and retrieve authoritative resource state through REST rather than treating a webhook body as the source of truth.

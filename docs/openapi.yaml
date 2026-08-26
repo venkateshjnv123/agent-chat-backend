@@ -1,0 +1,704 @@
+openapi: 3.1.0
+info:
+  title: Galaxy AI API
+  version: 1.0.0
+  description: Durable agent conversations used by the Galaxy AI chat application.
+servers:
+  - url: https://agent-chat-backend.vercel.app/api/v1
+    description: Production
+security:
+  - bearerAuth: []
+tags:
+  - name: System
+  - name: Conversations
+  - name: Runs
+  - name: Approvals
+  - name: Credits
+paths:
+  /health:
+    get:
+      tags: [System]
+      summary: Check service health
+      security: []
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, timestamp]
+                properties:
+                  status:
+                    type: string
+                    const: ok
+                  timestamp:
+                    type: string
+                    format: date-time
+  /chats:
+    get:
+      tags: [Conversations]
+      summary: List and search chats
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - name: q
+          in: query
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+      responses:
+        "200":
+          description: Cursor-paginated owned chats.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChatList"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [Conversations]
+      summary: Create a chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        "201":
+          description: Chat created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chat"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /chats/{chatId}:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+    get:
+      tags: [Conversations]
+      summary: Get a chat
+      responses:
+        "200":
+          description: Owned chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chat"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Conversations]
+      summary: Rename or pin a chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              additionalProperties: false
+              properties:
+                title:
+                  type: [string, "null"]
+                  minLength: 1
+                  maxLength: 200
+                pinned:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Chat"
+    delete:
+      tags: [Conversations]
+      summary: Delete a chat
+      description: Soft-deletes an owned chat when it has no active run.
+      responses:
+        "200":
+          description: Chat deleted.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, deleted]
+                properties:
+                  id:
+                    type: string
+                  deleted:
+                    type: boolean
+                    const: true
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /messages:
+    post:
+      tags: [Conversations]
+      summary: Submit an agent message
+      description: Atomically creates a chat when chatId is omitted, persists the turn, and dispatches one durable run.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "202":
+          description: Message persisted and durable run accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendMessageResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "402":
+          description: Insufficient credits.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /chats/{chatId}/messages:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+    get:
+      tags: [Conversations]
+      summary: List persisted messages
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Newest-first message page.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageList"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    post:
+      tags: [Conversations]
+      summary: Submit a message to a chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "202":
+          description: Message persisted and durable run accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SendMessageResponse"
+  /chats/{chatId}/runs/{runId}:
+    parameters:
+      - $ref: "#/components/parameters/ChatId"
+      - $ref: "#/components/parameters/RunId"
+    get:
+      tags: [Runs]
+      summary: Reconcile a run
+      description: Returns the PostgreSQL-backed run state and repairs a missing durable dispatch when safe.
+      responses:
+        "200":
+          description: Authoritative run state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRun"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /runs/{runId}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    post:
+      tags: [Runs]
+      summary: Cancel a run
+      description: Idempotently requests cancellation and preserves partial output.
+      responses:
+        "200":
+          description: Current cancellation state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [runId, status, cancelled]
+                properties:
+                  runId:
+                    type: string
+                  status:
+                    $ref: "#/components/schemas/RunStatus"
+                  cancelled:
+                    type: boolean
+  /runs/{runId}/retry:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    post:
+      tags: [Runs]
+      summary: Retry a failed run
+      responses:
+        "202":
+          description: Retry accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetryRunResponse"
+        "200":
+          description: Run was already active, retried, or ineligible.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetryRunResponse"
+  /runs/{runId}/waitpoints:
+    parameters:
+      - $ref: "#/components/parameters/RunId"
+    get:
+      tags: [Approvals]
+      summary: List approval history
+      responses:
+        "200":
+          description: Chronological waitpoint history.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Waitpoint"
+  /waitpoints/{waitpointId}/resolve:
+    parameters:
+      - name: waitpointId
+        in: path
+        required: true
+        schema:
+          type: string
+    post:
+      tags: [Approvals]
+      summary: Resolve a plan approval
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [resolution, idempotencyKey]
+              properties:
+                resolution:
+                  type: string
+                  enum: [RUN_ALL, STEP_BY_STEP, REQUEST_CHANGES]
+                feedback:
+                  type: string
+                  minLength: 1
+                  maxLength: 4000
+                idempotencyKey:
+                  type: string
+                  minLength: 8
+                  maxLength: 128
+      responses:
+        "200":
+          description: Resolution state; applied is false for duplicate or expired submissions.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [waitpointId, runId, status, resolution, applied]
+                properties:
+                  waitpointId:
+                    type: string
+                  runId:
+                    type: string
+                  status:
+                    type: string
+                    enum: [PENDING, RESOLVED, EXPIRED, CANCELLED]
+                  resolution:
+                    type: [string, "null"]
+                    enum: [RUN_ALL, STEP_BY_STEP, REQUEST_CHANGES, null]
+                  applied:
+                    type: boolean
+  /credits:
+    get:
+      tags: [Credits]
+      summary: Get credit balance
+      responses:
+        "200":
+          description: Available and reserved microcredits.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [availableBalance, reservedBalance, formatted]
+                properties:
+                  availableBalance:
+                    type: integer
+                  reservedBalance:
+                    type: integer
+                  formatted:
+                    type: string
+  /credits/ledger:
+    get:
+      tags: [Credits]
+      summary: List credit ledger
+      parameters:
+        - $ref: "#/components/parameters/Cursor"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Cursor-paginated reserve, settle, and refund entries.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Clerk JWT
+  parameters:
+    ChatId:
+      name: chatId
+      in: path
+      required: true
+      schema:
+        type: string
+    RunId:
+      name: runId
+      in: path
+      required: true
+      schema:
+        type: string
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+      description: Opaque cursor returned by the previous response.
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Authentication required.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource is missing or not owned by the caller.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Request conflicts with active state.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: Too many requests.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [error, message, code, traceId]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        code:
+          type: string
+          enum:
+            [
+              UNAUTHORIZED,
+              FORBIDDEN,
+              BAD_REQUEST,
+              NOT_FOUND,
+              CONFLICT,
+              RATE_LIMITED,
+              INSUFFICIENT_CREDITS,
+              INTERNAL,
+            ]
+        details:
+          type: object
+          additionalProperties: true
+        traceId:
+          type: string
+    Chat:
+      type: object
+      required: [id, title, modelId, pinned, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        title:
+          type: [string, "null"]
+        modelId:
+          type: string
+        pinned:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ChatList:
+      type: object
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Chat"
+        nextCursor:
+          type: [string, "null"]
+        hasMore:
+          type: boolean
+    SendMessageRequest:
+      type: object
+      required: [content, idempotencyKey]
+      properties:
+        chatId:
+          type: string
+          description: Omit to create the chat atomically with the first turn.
+        content:
+          type: string
+          minLength: 1
+          maxLength: 16000
+        idempotencyKey:
+          type: string
+          minLength: 8
+          maxLength: 128
+        attachmentIds:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            type: string
+        planMode:
+          type: boolean
+          default: false
+    SendMessageResponse:
+      type: object
+      required: [chatId, messageId, runId, realtimeRunId, realtimeToken]
+      properties:
+        chatId:
+          type: string
+        messageId:
+          type: string
+        runId:
+          type: string
+        realtimeRunId:
+          type: [string, "null"]
+        realtimeToken:
+          type: string
+          description: Short-lived token scoped to the Trigger.dev run.
+    RunStatus:
+      type: string
+      enum: [QUEUED, RUNNING, WAITING, CANCELLING, COMPLETED, FAILED, CANCELLED]
+    AgentRun:
+      type: object
+      required:
+        [
+          id,
+          chatId,
+          status,
+          turns,
+          routedModel,
+          userMessage,
+          retryable,
+          cancellationRequestedAt,
+          startedAt,
+          completedAt,
+        ]
+      properties:
+        id:
+          type: string
+        chatId:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        turns:
+          type: integer
+          minimum: 0
+        routedModel:
+          type: [string, "null"]
+        userMessage:
+          type: [string, "null"]
+        retryable:
+          type: boolean
+        cancellationRequestedAt:
+          type: [string, "null"]
+          format: date-time
+        startedAt:
+          type: [string, "null"]
+          format: date-time
+        completedAt:
+          type: [string, "null"]
+          format: date-time
+    RetryRunResponse:
+      type: object
+      required:
+        [
+          runId,
+          chatId,
+          messageId,
+          status,
+          retried,
+          attempt,
+          realtimeRunId,
+          realtimeToken,
+          reason,
+        ]
+      properties:
+        runId:
+          type: string
+        chatId:
+          type: string
+        messageId:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        retried:
+          type: boolean
+        attempt:
+          type: integer
+          minimum: 0
+        realtimeRunId:
+          type: [string, "null"]
+        realtimeToken:
+          type: string
+        reason:
+          type: [string, "null"]
+          enum: [not_retryable, run_active, already_retried, null]
+    MessageList:
+      type: object
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        nextCursor:
+          type: [string, "null"]
+        hasMore:
+          type: boolean
+    Message:
+      type: object
+      required:
+        [
+          id,
+          chatId,
+          role,
+          status,
+          content,
+          sequence,
+          runId,
+          creditUsed,
+          toolInvocations,
+          createdAt,
+        ]
+      properties:
+        id:
+          type: string
+        chatId:
+          type: string
+        role:
+          type: string
+          enum: [USER, ASSISTANT]
+        status:
+          type: string
+          enum: [PENDING, STREAMING, SUCCESS, FAILED, CANCELLED]
+        content:
+          type: string
+        sequence:
+          type: string
+          pattern: "^[0-9]+$"
+        runId:
+          type: [string, "null"]
+        creditUsed:
+          type: integer
+          minimum: 0
+        toolInvocations:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+    Waitpoint:
+      type: object
+      required:
+        [
+          id,
+          runId,
+          type,
+          status,
+          payload,
+          resolution,
+          supportedResolutions,
+          expiresAt,
+          resolvedAt,
+          createdAt,
+        ]
+      properties:
+        id:
+          type: string
+        runId:
+          type: string
+        type:
+          type: string
+          const: PLAN_APPROVAL
+        status:
+          type: string
+          enum: [PENDING, RESOLVED, EXPIRED, CANCELLED]
+        payload:
+          type: object
+          additionalProperties: true
+        resolution:
+          type: [string, "null"]
+        supportedResolutions:
+          type: array
+          items:
+            type: string
+            enum: [RUN_ALL, STEP_BY_STEP, REQUEST_CHANGES]
+        expiresAt:
+          type: string
+          format: date-time
+        resolvedAt:
+          type: [string, "null"]
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time

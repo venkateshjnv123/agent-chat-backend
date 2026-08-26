@@ -95,7 +95,7 @@ export async function buildCompleteExecutionPlan(options: {
       signal: options.signal,
     })) {
       if (chunk.type === "text") text += chunk.text;
-      else {
+      else if (chunk.type === "done") {
         routedModel = chunk.routedModel ?? routedModel;
         usage = addTokenUsage(usage, chunk.usage);
       }

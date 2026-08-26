@@ -1,0 +1,29 @@
+---
+title: "Galaxy AI API"
+description: "Durable agent conversations, realtime progress, typed tools, and human approvals."
+---
+
+Galaxy AI exposes the versioned REST surface used by the production chat application. A request accepts a user turn quickly, while a Trigger.dev worker continues the agent run outside the HTTP lifecycle.
+
+## What the API provides
+
+- Clerk-authenticated conversations scoped to their owner
+- Cursor-paginated chats and message history
+- Durable OpenRouter Free agent runs
+- Realtime assistant text and activity streams
+- Typed plan approvals, cancellation, and retry
+- Persisted Magica media results and credit settlement
+
+## Durable by design
+
+PostgreSQL is the source of truth. Realtime updates make the interface responsive, but clients always reconcile run status and message history through REST after reloads, reconnects, and terminal events.
+
+The API enforces idempotency at message dispatch, tool execution, approval, and credit-settlement boundaries. Repeating a safe request does not intentionally duplicate a run or charge.
+
+## Base URL
+
+```text
+https://agent-chat-backend.vercel.app/api/v1
+```
+
+Start with the [quickstart](/quickstart), then read [authentication](/authentication) and the [run lifecycle](/guides/run-lifecycle).

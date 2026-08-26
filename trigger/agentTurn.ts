@@ -17,7 +17,7 @@ import { prisma } from "@/db/client";
 import { recordModelUsage } from "@/services/creditLedger";
 import { finalizeCancelledRun } from "@/services/cancelRun";
 import {
-  checkpointAssistantText,
+  checkpointAssistantState,
   STREAM_CHECKPOINT_CHARACTERS,
   STREAM_CHECKPOINT_INTERVAL_MS,
 } from "@/services/messageStream";
@@ -30,8 +30,13 @@ import {
   updatePlanWaitpointPayload,
 } from "@/services/waitpoints";
 import { getTool } from "@/tools/registry";
-import type { ContentBlock } from "@/contracts/chat";
+import {
+  AssetSchema,
+  ToolResultSchema,
+  type ContentBlock,
+} from "@/contracts/chat";
 import { magicaTool } from "./magicaTool";
+import { openAgentActivityStream } from "./activityStream";
 import { openAssistantTextStream } from "./textStream";
 import {
   claimToolCall,
@@ -90,7 +95,10 @@ export type AgentTurnPayload = {
 const MAX_TURNS = 8;
 export const agentTurn = task({
   id: "agent-turn",
-  maxDuration: 300,
+  // A media workflow can run several slow children in sequence (image, video,
+  // audio, merge) and still needs one final model call after they finish.
+  // Five minutes cut healthy demo runs off immediately after the first tool.
+  maxDuration: 30 * 60,
   run: async (payload: AgentTurnPayload, { signal }) => {
     const log = (message: string, extra: Record<string, unknown> = {}) =>
       logger.info(message, {
@@ -132,12 +140,17 @@ export const agentTurn = task({
     }
 
     metadata.set("status", "running");
+    metadata.set("runId", payload.runId);
+    metadata.set("messageId", payload.assistantMessageId);
+    metadata.set("currentStep", "Planning request");
+    metadata.set("progress", 0);
 
     // Token-by-token delivery. Separate from run metadata so status and text
     // travel on their own channels, and best-effort so a stream that cannot
     // open never costs the turn. Opened outside the try because a failed turn
     // must close it too.
     const textStream = await openAssistantTextStream(log);
+    const activityStream = await openAgentActivityStream(log);
 
     try {
       const history = await restoreConversation(
@@ -178,8 +191,21 @@ export const agentTurn = task({
       let checkpointedCharacters = 0;
       let nextCheckpointAt = 0;
       let streamStarted = false;
+      let textSequence = 0;
+      let activitySequence = 0;
+      let thinkingDurationMs = 0;
       let approvalState: ApprovalState | null = null;
       let planningStopped = false;
+
+      activityStream.push({
+        type: "progress",
+        runId: payload.runId,
+        messageId: payload.assistantMessageId,
+        sequence: ++activitySequence,
+        stage: "planning",
+        currentStep: "Building execution plan",
+        progress: 0.05,
+      });
 
       const preflight = await safelyBuildCompletePlan({
         provider,
@@ -221,7 +247,12 @@ export const agentTurn = task({
         }
 
         let turnText = "";
+        let turnThinking = "";
+        let thinkingStartedAt: number | null = null;
         let toolCalls: ToolCall[] = [];
+
+        metadata.set("currentStep", "Thinking");
+        metadata.set("progress", Math.min(0.1 + turns * 0.08, 0.7));
 
         for await (const chunk of provider.stream({
           messages: conversation,
@@ -241,10 +272,60 @@ export const agentTurn = task({
             }
           }
 
-          if (chunk.type === "text") {
+          if (chunk.type === "reasoning") {
+            const now = Date.now();
+            thinkingStartedAt ??= now;
+            turnThinking += chunk.text;
+            activityStream.push({
+              type: "thinking",
+              runId: payload.runId,
+              messageId: payload.assistantMessageId,
+              sequence: ++activitySequence,
+              text: chunk.text,
+              elapsedMs: thinkingDurationMs + (now - thinkingStartedAt),
+            });
+            metadata.set("currentStep", "Thinking");
+
+            if (now >= nextCheckpointAt) {
+              nextCheckpointAt = now + STREAM_CHECKPOINT_INTERVAL_MS;
+              try {
+                await checkpointAssistantState({
+                  messageId: payload.assistantMessageId,
+                  content: text,
+                  blocks: withPartialBlocks(blocks, turnThinking, turnText),
+                  reasoning: allThinking(
+                    withPartialBlocks(blocks, turnThinking, turnText),
+                  ),
+                  turns,
+                  thinkingDurationSeconds:
+                    (thinkingDurationMs + now - thinkingStartedAt) / 1_000,
+                });
+              } catch (error) {
+                log("assistant state checkpoint failed", {
+                  reason:
+                    error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
+          } else if (chunk.type === "text") {
+            if (thinkingStartedAt !== null) {
+              thinkingDurationMs += Date.now() - thinkingStartedAt;
+              thinkingStartedAt = null;
+              metadata.set(
+                "thinkingDurationSeconds",
+                thinkingDurationMs / 1_000,
+              );
+            }
             turnText += chunk.text;
             text += chunk.text;
-            textStream.push({ turn: turns, text: chunk.text });
+            textStream.push({
+              runId: payload.runId,
+              messageId: payload.assistantMessageId,
+              sequence: ++textSequence,
+              turn: turns,
+              text: chunk.text,
+            });
+            metadata.set("currentStep", "Writing response");
             metadata.set("streamedCharacters", text.length);
 
             const now = Date.now();
@@ -262,7 +343,16 @@ export const agentTurn = task({
               nextCheckpointAt = now + STREAM_CHECKPOINT_INTERVAL_MS;
 
               try {
-                await checkpointAssistantText(payload.assistantMessageId, text);
+                await checkpointAssistantState({
+                  messageId: payload.assistantMessageId,
+                  content: text,
+                  blocks: withPartialBlocks(blocks, turnThinking, turnText),
+                  reasoning: allThinking(
+                    withPartialBlocks(blocks, turnThinking, turnText),
+                  ),
+                  turns,
+                  thinkingDurationSeconds: thinkingDurationMs / 1_000,
+                });
               } catch (error) {
                 log("assistant text checkpoint failed", {
                   reason:
@@ -271,6 +361,10 @@ export const agentTurn = task({
               }
             }
           } else {
+            if (thinkingStartedAt !== null) {
+              thinkingDurationMs += Date.now() - thinkingStartedAt;
+              thinkingStartedAt = null;
+            }
             routedModel = chunk.routedModel ?? routedModel;
             // Usage is per model call; the turn total is what the run records.
             usage = addUsage(usage, chunk.usage);
@@ -278,6 +372,12 @@ export const agentTurn = task({
           }
         }
 
+        if (thinkingStartedAt !== null) {
+          thinkingDurationMs += Date.now() - thinkingStartedAt;
+        }
+        if (turnThinking) {
+          blocks.push({ type: "thinking", thinking: turnThinking });
+        }
         if (turnText) blocks.push({ type: "text", text: turnText });
 
         if (signal?.aborted || cancellationObserved || toolCalls.length === 0) {
@@ -369,6 +469,29 @@ export const agentTurn = task({
         }
 
         metadata.set("status", "running_tools");
+        metadata.set("currentStep", "Running tools");
+        activityStream.push({
+          type: "progress",
+          runId: payload.runId,
+          messageId: payload.assistantMessageId,
+          sequence: ++activitySequence,
+          stage: "running_tools",
+          currentStep: toolCalls.map((call) => call.name).join(", "),
+          progress: Math.min(0.2 + turns * 0.1, 0.85),
+        });
+        for (const call of toolCalls) {
+          if (!getTool(call.name)) continue;
+          activityStream.push({
+            type: "tool",
+            runId: payload.runId,
+            messageId: payload.assistantMessageId,
+            sequence: ++activitySequence,
+            toolCallId: call.id,
+            toolName: call.name,
+            state: "RUNNING",
+            result: null,
+          });
+        }
         const approvedExecution = await runApprovedToolCalls({
           payload,
           toolCalls,
@@ -386,6 +509,39 @@ export const agentTurn = task({
         // order they finished, so a replayed conversation is byte-identical.
         for (const call of toolCalls) {
           const execution = executions.get(call.id);
+          const parsedResult = ToolResultSchema.safeParse(execution?.result);
+
+          if (getTool(call.name) && execution) {
+            activityStream.push({
+              type: "tool",
+              runId: payload.runId,
+              messageId: payload.assistantMessageId,
+              sequence: ++activitySequence,
+              toolCallId: call.id,
+              toolName: call.name,
+              state: execution.state,
+              result: parsedResult.success ? parsedResult.data : null,
+            });
+
+            if (
+              parsedResult.success &&
+              (parsedResult.data.type === "image" ||
+                parsedResult.data.type === "video" ||
+                parsedResult.data.type === "audio")
+            ) {
+              for (const url of parsedResult.data.urls) {
+                activityStream.push({
+                  type: "asset",
+                  runId: payload.runId,
+                  messageId: payload.assistantMessageId,
+                  sequence: ++activitySequence,
+                  toolCallId: call.id,
+                  assetType: parsedResult.data.type,
+                  url,
+                });
+              }
+            }
+          }
 
           conversation.push({
             role: "tool",
@@ -454,6 +610,15 @@ export const agentTurn = task({
       // waiting for deltas and falls back to the persisted message, which is
       // about to become the complete one.
       textStream.close();
+      activityStream.push({
+        type: "progress",
+        runId: payload.runId,
+        messageId: payload.assistantMessageId,
+        sequence: ++activitySequence,
+        stage: "finalizing",
+        currentStep: "Saving result",
+        progress: 0.95,
+      });
 
       const finalStatus = await persistTurnTerminal(payload, {
         text,
@@ -463,7 +628,10 @@ export const agentTurn = task({
         turns,
         exhausted,
         cancelled,
+        thinkingDurationSeconds: thinkingDurationMs / 1_000,
       });
+
+      activityStream.close();
 
       metadata.set(
         "status",
@@ -473,6 +641,8 @@ export const agentTurn = task({
             ? "completed"
             : "failed",
       );
+      metadata.set("progress", 1);
+      metadata.set("currentStep", "Complete");
       log("turn finished", {
         cancelled: finalStatus === "CANCELLED",
         characters: text.length,
@@ -482,6 +652,7 @@ export const agentTurn = task({
       return { runId: payload.runId, characters: text.length };
     } catch (error) {
       textStream.close();
+      activityStream.close();
       await failRun(payload, error);
       throw error;
     }
@@ -725,6 +896,7 @@ async function requestPlanDecision(
   // reads back from GET /v1/runs/:runId/waitpoint.
   metadata.set("status", "awaiting_approval");
   metadata.set("waitpointId", waitpointId);
+  metadata.set("currentStep", "Awaiting plan approval");
 
   log("plan awaiting approval", {
     waitpointTokenId: tokenId,
@@ -755,6 +927,7 @@ async function requestPlanDecision(
     }
 
     metadata.set("status", "running");
+    metadata.set("currentStep", "Plan approval expired");
 
     return {
       waitpointId,
@@ -780,6 +953,7 @@ async function requestPlanDecision(
   }
 
   metadata.set("status", "running");
+  metadata.set("currentStep", "Resuming approved plan");
 
   return { waitpointId, decision: result.output, terminalMessage: null };
 }
@@ -1075,6 +1249,33 @@ function asRecord(input: unknown): Record<string, unknown> {
     : {};
 }
 
+function withPartialBlocks(
+  persisted: ContentBlock[],
+  thinking: string,
+  text: string,
+): ContentBlock[] {
+  return [
+    ...persisted,
+    ...(thinking ? [{ type: "thinking" as const, thinking }] : []),
+    ...(text ? [{ type: "text" as const, text }] : []),
+  ];
+}
+
+function allThinking(blocks: ContentBlock[]): string {
+  return blocks
+    .flatMap((block) => (block.type === "thinking" ? [block.thinking] : []))
+    .join("\n\n");
+}
+
+function filenameFromUrl(value: string): string | null {
+  try {
+    const name = new URL(value).pathname.split("/").filter(Boolean).at(-1);
+    return name ? decodeURIComponent(name) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function cancellationRequested(runId: string): Promise<boolean> {
   const run = await prisma.agentRun.findUnique({
     where: { id: runId },
@@ -1094,6 +1295,7 @@ async function persistTurnTerminal(
     turns: number;
     exhausted: boolean;
     cancelled: boolean;
+    thinkingDurationSeconds: number;
   },
 ) {
   return prisma.$transaction(async (tx) => {
@@ -1145,6 +1347,55 @@ async function persistTurnTerminal(
       return winner?.status ?? ("FAILED" as const);
     }
 
+    const invocations = await tx.toolInvocation.findMany({
+      where: { runId: payload.runId, state: "COMPLETED" },
+      orderBy: { createdAt: "asc" },
+      select: {
+        executionKey: true,
+        toolName: true,
+        result: true,
+        sanitizedInput: true,
+        creditUsed: true,
+      },
+    });
+    const assets = invocations.flatMap((invocation) => {
+      const result = ToolResultSchema.safeParse(invocation.result);
+      if (
+        !result.success ||
+        (result.data.type !== "image" &&
+          result.data.type !== "video" &&
+          result.data.type !== "audio")
+      ) {
+        return [];
+      }
+      const media = result.data;
+
+      const input = asRecord(invocation.sanitizedInput);
+      const prompt = typeof input.prompt === "string" ? input.prompt : null;
+      const toolCallId = invocation.executionKey.startsWith(`${payload.runId}:`)
+        ? invocation.executionKey.slice(payload.runId.length + 1)
+        : null;
+
+      return media.urls.map((url) =>
+        AssetSchema.parse({
+          type: media.type,
+          url,
+          model: invocation.toolName,
+          mode: media.type,
+          creditUsed: invocation.creditUsed,
+          toolCallId,
+          prompt,
+          filename: filenameFromUrl(url),
+          metadata: {
+            mimeType: media.mimeType,
+            width: media.type === "image" ? media.width : null,
+            height: media.type === "image" ? media.height : null,
+            fileSize: null,
+          },
+        }),
+      );
+    });
+
     await tx.message.updateMany({
       where: {
         id: payload.assistantMessageId,
@@ -1154,6 +1405,8 @@ async function persistTurnTerminal(
         content: outcome.text,
         contentBlocks:
           outcome.blocks.length > 0 ? (outcome.blocks as never) : undefined,
+        reasoning: allThinking(outcome.blocks) || null,
+        assets: assets.length > 0 ? (assets as never) : undefined,
         status: cancelled ? "CANCELLED" : "SUCCESS",
         tokenUsage: outcome.usage ?? undefined,
         aiModel: outcome.routedModel
@@ -1166,7 +1419,7 @@ async function persistTurnTerminal(
         metadata: {
           turns: outcome.turns,
           maxTurnsReached: outcome.exhausted,
-          thinkingDurationSeconds: null,
+          thinkingDurationSeconds: outcome.thinkingDurationSeconds,
         },
       },
     });
@@ -1209,6 +1462,7 @@ async function restoreConversation(
  */
 async function failRun(payload: AgentTurnPayload, error: unknown) {
   const isEmptyStream = error instanceof EmptyStreamError;
+  const isTimeout = error instanceof Error && error.name === "TimeoutError";
   const errorCode = isEmptyStream
     ? "empty_stream"
     : error instanceof Error
@@ -1221,14 +1475,17 @@ async function failRun(payload: AgentTurnPayload, error: unknown) {
   // request is the one that knows which it was.
   const retryable =
     isEmptyStream ||
+    isTimeout ||
     (error instanceof TransientProviderError &&
       !(error instanceof PermanentProviderError));
 
   const userMessage = isEmptyStream
     ? "The model returned an empty response. Try sending the message again."
-    : retryable
-      ? "The model provider was unavailable. You can retry this turn."
-      : "This turn failed before it finished.";
+    : isTimeout
+      ? "This turn took longer than expected. You can retry it safely."
+      : retryable
+        ? "The model provider was unavailable. You can retry this turn."
+        : "This turn failed before it finished.";
 
   logger.error("turn failed", {
     chatId: payload.chatId,
@@ -1308,5 +1565,9 @@ async function failRun(payload: AgentTurnPayload, error: unknown) {
       : finalStatus === "COMPLETED"
         ? "completed"
         : "failed",
+  );
+  metadata.set(
+    "currentStep",
+    finalStatus === "CANCELLED" ? "Cancelled" : "Failed",
   );
 }

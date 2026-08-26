@@ -209,6 +209,20 @@ describe("OpenRouter tool streaming", () => {
     expect(chunks.at(-1)).toMatchObject({ type: "done", toolCalls: [] });
   });
 
+  it("emits provider reasoning separately from assistant text", async () => {
+    const chunks = await collect([
+      { choices: [{ delta: { reasoning: "Checking dependencies." } }] },
+      { choices: [{ delta: { content: "Done." }, finish_reason: "stop" }] },
+    ]);
+
+    expect(chunks).toEqual(
+      expect.arrayContaining([
+        { type: "reasoning", text: "Checking dependencies." },
+        { type: "text", text: "Done." },
+      ]),
+    );
+  });
+
   it("sends the registry tools and maps tool results onto the wire format", async () => {
     vi.stubGlobal(
       "fetch",

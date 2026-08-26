@@ -116,7 +116,7 @@ describe("stale lock", () => {
   });
 
   it("releases a run whose worker died and marks it retryable", async () => {
-    run.startedAt = new Date(Date.now() - 30 * 60 * 1000);
+    run.startedAt = new Date(Date.now() - 40 * 60 * 1000);
 
     const outcome = await reclaimStaleRun("chat_1");
 
@@ -133,14 +133,14 @@ describe("stale lock", () => {
   it("dates the lease from acceptance when the run never started", async () => {
     run.status = "QUEUED";
     run.startedAt = null;
-    run.createdAt = new Date(Date.now() - 30 * 60 * 1000);
+    run.createdAt = new Date(Date.now() - 40 * 60 * 1000);
 
     expect(await reclaimStaleRun("chat_1")).toMatchObject({ reclaimed: true });
   });
 
   it("never reclaims a run waiting on a person", async () => {
     run.status = "WAITING";
-    run.startedAt = new Date(Date.now() - 30 * 60 * 1000);
+    run.startedAt = new Date(Date.now() - 40 * 60 * 1000);
 
     // A plan waiting for approval is doing exactly what it should, and carries
     // its own one-hour expiry.
@@ -151,7 +151,7 @@ describe("stale lock", () => {
   });
 
   it("does not fail a run that came back to life mid-check", async () => {
-    run.startedAt = new Date(Date.now() - 30 * 60 * 1000);
+    run.startedAt = new Date(Date.now() - 40 * 60 * 1000);
     agentRun.updateMany.mockResolvedValueOnce({ count: 0 });
 
     expect(await reclaimStaleRun("chat_1")).toMatchObject({

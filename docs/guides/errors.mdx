@@ -1,0 +1,33 @@
+---
+title: "Errors"
+description: "Handle uniform, non-leaking API failures."
+---
+
+Every API failure uses one envelope:
+
+```json
+{
+  "error": "Invalid request.",
+  "message": "Invalid request.",
+  "code": "BAD_REQUEST",
+  "details": {
+    "issueCount": 1,
+    "issues": [{ "code": "invalid_type", "pathDepth": 1 }]
+  },
+  "traceId": "8b82d1c5-4cca-4c10-91bb-16c0a7e0cc03"
+}
+```
+
+Validation failures expose issue codes and path depth, never submitted values or field names. Include `traceId` when reporting a failure.
+
+| HTTP | Code                   | Meaning                                 |
+| ---- | ---------------------- | --------------------------------------- |
+| 400  | `BAD_REQUEST`          | Malformed or invalid input              |
+| 401  | `UNAUTHORIZED`         | Missing or invalid session token        |
+| 402  | `INSUFFICIENT_CREDITS` | The run cannot reserve required credits |
+| 404  | `NOT_FOUND`            | Missing or unowned resource             |
+| 409  | `CONFLICT`             | Conflicting active run or mutation      |
+| 429  | `RATE_LIMITED`         | Caller or provider limit reached        |
+| 500  | `INTERNAL`             | Unexpected server failure               |
+
+Retry `429` and transient `500` responses only with bounded exponential backoff. Reuse the same idempotency key for the same logical request.

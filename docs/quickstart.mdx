@@ -1,0 +1,52 @@
+---
+title: "Quickstart"
+description: "Submit a message and reconcile the durable agent run."
+---
+
+## 1. Check service health
+
+The health route is the only endpoint that does not require authentication.
+
+```bash
+curl https://agent-chat-backend.vercel.app/api/v1/health
+```
+
+## 2. Submit a message
+
+Use a Clerk session token from the signed-in Galaxy application. Reuse the same `idempotencyKey` when retrying the same logical submission.
+
+```bash
+curl --request POST \
+  --url https://agent-chat-backend.vercel.app/api/v1/messages \
+  --header "Authorization: Bearer $CLERK_SESSION_TOKEN" \
+  --header "Content-Type: application/json" \
+  --data '{
+    "content": "Crop this image to its centre square: https://picsum.photos/id/237/800/600",
+    "idempotencyKey": "quickstart-turn-001",
+    "planMode": true
+  }'
+```
+
+The API returns `202 Accepted` with the new `chatId`, persisted user `messageId`, internal `runId`, and scoped realtime credentials.
+
+```json
+{
+  "chatId": "chat_123",
+  "messageId": "msg_123",
+  "runId": "run_123",
+  "realtimeRunId": "trigger_run_123",
+  "realtimeToken": "scoped-token"
+}
+```
+
+## 3. Reconcile the run
+
+Poll the authoritative run until it becomes `WAITING`, `COMPLETED`, `FAILED`, or `CANCELLED`.
+
+```bash
+curl \
+  --url https://agent-chat-backend.vercel.app/api/v1/chats/chat_123/runs/run_123 \
+  --header "Authorization: Bearer $CLERK_SESSION_TOKEN"
+```
+
+When a plan-mode run becomes `WAITING`, read its waitpoints and resolve the pending approval. After completion, read persisted messages from `GET /chats/{chatId}/messages`.

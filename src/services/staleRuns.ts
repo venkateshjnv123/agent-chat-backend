@@ -20,10 +20,10 @@ import { prisma } from "@/db/client";
 /**
  * How long a run may hold the lock without finishing.
  *
- * The task's own `maxDuration` is 300s, so anything past this either crashed
+ * The task's own `maxDuration` is 30 minutes, so anything past this either crashed
  * without unwinding or was lost between the API and the worker.
  */
-const LEASE_MS = 10 * 60 * 1000;
+const LEASE_MS = 35 * 60 * 1000;
 
 /** Statuses that hold the one-active-run lock and are expected to progress. */
 const HOLDS_LOCK = ["QUEUED", "RUNNING"] as const;

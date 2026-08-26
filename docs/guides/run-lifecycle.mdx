@@ -1,0 +1,43 @@
+---
+title: "Run lifecycle"
+description: "Accept, observe, approve, cancel, retry, and recover durable agent turns."
+---
+
+## Status model
+
+An agent run moves through these persisted states:
+
+```text
+QUEUED -> RUNNING -> WAITING -> RUNNING -> COMPLETED
+                    |                    |
+                    +-> CANCELLING -----+-> CANCELLED
+                    +--------------------+-> FAILED
+```
+
+`POST /messages` returns quickly after atomically persisting the user message, assistant placeholder, and queued run. Trigger.dev performs the long-running work.
+
+## Realtime and reconciliation
+
+Realtime text and activity are delivery channels, not durable storage. Clients should:
+
+1. Subscribe using the scoped token returned by message submission.
+2. Append text deltas and render run activity optimistically.
+3. Refresh the scoped token before expiry.
+4. Reconcile `GET /chats/{chatId}/runs/{runId}` after reconnects and terminal events.
+5. Read `GET /chats/{chatId}/messages` for the persisted final result.
+
+## Plan approvals
+
+With `planMode: true`, billable tool work pauses at a persisted waitpoint. Read `GET /runs/{runId}/waitpoints`, then resolve it with one of:
+
+- `RUN_ALL`
+- `STEP_BY_STEP`
+- `REQUEST_CHANGES`, with feedback
+
+Every resolution requires an idempotency key. Duplicate submissions safely return the existing resolution.
+
+## Cancellation and retry
+
+Cancellation is idempotent. A request can first report `CANCELLING` while the worker checkpoints partial output, then settle at `CANCELLED`.
+
+Failed runs include a user-safe message and `retryable` flag. `POST /runs/{runId}/retry` reuses the original run and assistant message instead of creating duplicate history.

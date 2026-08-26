@@ -1,0 +1,52 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "mint",
+  "name": "Galaxy AI API",
+  "description": "Build durable, realtime agent conversations with typed tools and human approvals.",
+  "colors": {
+    "primary": "#6D5EF7",
+    "light": "#8B7FF8",
+    "dark": "#5546E8"
+  },
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get started",
+            "pages": ["index", "quickstart", "authentication"]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/run-lifecycle",
+              "guides/errors",
+              "guides/webhooks"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "openapi": "openapi.yaml"
+      }
+    ]
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "Open app",
+        "href": "https://agent-chat-frontend.vercel.app"
+      }
+    ]
+  },
+  "api": {
+    "playground": {
+      "display": "interactive"
+    },
+    "examples": {
+      "languages": ["curl", "javascript", "python"]
+    }
+  }
+}

@@ -76,7 +76,7 @@ export type PollOptions = {
 
 const DEFAULT_POLL: PollOptions = {
   // crop_image alone takes 10-15s; generation and merges are far slower.
-  timeoutMs: 10 * 60 * 1000,
+  timeoutMs: 15 * 60 * 1000,
   initialDelayMs: 1_500,
   maxDelayMs: 10_000,
 };

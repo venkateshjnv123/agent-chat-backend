@@ -1,0 +1,24 @@
+---
+title: "Authentication"
+description: "Authenticate requests with a Clerk bearer token."
+---
+
+All routes except `GET /health` require a valid Clerk session token.
+
+```http
+Authorization: Bearer <clerk-session-token>
+```
+
+Tokens are verified against the configured Clerk issuer and authorized frontend origin. The backend derives account ownership from the verified token; callers cannot choose an account ID in request bodies.
+
+## Browser applications
+
+Obtain a fresh token from the active Clerk session immediately before an API request. Refresh it when it expires rather than storing it as a long-lived application secret.
+
+## Ownership behavior
+
+Chats, messages, runs, attachments, waitpoints, and credit entries are owner-scoped. Requests for a missing resource and requests for another user's resource both return `404`, preventing resource-ID probing.
+
+## Authentication errors
+
+Missing, expired, malformed, or untrusted tokens return `401` using the standard error envelope. Never place Clerk secret keys or Magica credentials in browser code, documentation examples, URLs, or logs.

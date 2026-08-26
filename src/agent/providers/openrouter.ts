@@ -18,7 +18,7 @@ import { readOpenRouterEnv } from "@/env/server";
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
 /** Ceiling on waiting for response headers. */
-const CONNECT_TIMEOUT_MS = 30_000;
+const CONNECT_TIMEOUT_MS = 90_000;
 
 /**
  * Ceiling on the gap between two stream frames.
@@ -27,7 +27,7 @@ const CONNECT_TIMEOUT_MS = 30_000;
  * catching is a connection that was accepted and then went quiet, which a
  * whole-request timeout only notices minutes later.
  */
-const IDLE_TIMEOUT_MS = 60_000;
+const IDLE_TIMEOUT_MS = 120_000;
 
 /**
  * OpenRouter implementation, pinned to the free model.
@@ -159,6 +159,12 @@ export class OpenRouterProvider implements AgentProvider {
         finishReason = choice?.finish_reason ?? finishReason;
 
         const text = choice?.delta?.content;
+        const reasoning = choice?.delta?.reasoning;
+
+        if (reasoning) {
+          produced = true;
+          yield { type: "reasoning", text: reasoning };
+        }
 
         if (text) {
           produced = true;
@@ -264,6 +270,7 @@ type OpenRouterFrame = {
     finish_reason?: string | null;
     delta?: {
       content?: string;
+      reasoning?: string;
       tool_calls?: {
         index: number;
         id?: string;
@@ -304,10 +311,7 @@ async function readWithIdleTimeout(
       reader.read(),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
-          const error = new Error("openrouter_stream_idle");
-
-          error.name = "TimeoutError";
-          reject(error);
+          reject(new TransientProviderError("openrouter_stream_idle"));
         }, IDLE_TIMEOUT_MS);
       }),
     ]);
