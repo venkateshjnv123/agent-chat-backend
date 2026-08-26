@@ -1,8 +1,15 @@
 import { defineConfig } from "@trigger.dev/sdk";
+import { additionalFiles } from "@trigger.dev/build/extensions/core";
 
 export default defineConfig({
-  project: process.env.TRIGGER_PROJECT_REF ?? "",
+  project: "proj_adiutmpaxdmidlmnvxky",
   dirs: ["./trigger"],
+  // Match production locally: process.cwd() is the build root, where the
+  // additional-files extension preserves the repository-relative path.
+  legacyDevProcessCwdBehaviour: false,
+  build: {
+    extensions: [additionalFiles({ files: ["./agent-skills/**"] })],
+  },
   maxDuration: 300,
   machine: "small-1x",
   retries: {

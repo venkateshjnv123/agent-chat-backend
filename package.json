@@ -38,6 +38,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@trigger.dev/build": "4.5.12",
     "@types/node": "^20",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",

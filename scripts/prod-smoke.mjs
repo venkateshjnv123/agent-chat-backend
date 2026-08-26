@@ -31,11 +31,16 @@ const BACKEND =
   process.env.BACKEND_URL ?? "https://agent-chat-backend.vercel.app";
 const CLERK = "https://api.clerk.com/v1";
 const SECRET = process.env.CLERK_SECRET_KEY;
-const EMAIL = process.env.SMOKE_USER_EMAIL ?? "smoke+agentchat@example.com";
+const EMAIL = process.env.SMOKE_USER_EMAIL ?? "smoke+clerk_test@example.com";
 const PASSWORD = process.env.SMOKE_USER_PASSWORD ?? "Sm0ke-Test-Passw0rd!42";
+const SMOKE_FRONTEND_ORIGIN =
+  process.env.SMOKE_FRONTEND_ORIGIN ?? "https://agent-chat-frontend.vercel.app";
+const EXISTING_SESSION_ID = process.env.SMOKE_EXISTING_SESSION_ID;
+const TOKEN_URL = process.env.SMOKE_TOKEN_URL;
+const INSPECT_RUN_ID = process.env.SMOKE_INSPECT_RUN_ID;
 const SMOKE_SESSION_ID = `prod-smoke-${Date.now()}`;
 
-if (!SECRET) throw new Error("CLERK_SECRET_KEY is required");
+if (!SECRET && !TOKEN_URL) throw new Error("CLERK_SECRET_KEY is required");
 
 const step = (message, extra) =>
   console.log(`\n▸ ${message}`, extra === undefined ? "" : extra);
@@ -69,7 +74,17 @@ async function testUserId() {
     `/users?email_address=${encodeURIComponent(EMAIL)}`,
   );
 
-  if (existing.length > 0) return existing[0].id;
+  if (existing.length > 0) {
+    await clerk(`/users/${existing[0].id}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        password: PASSWORD,
+        skip_password_checks: true,
+      }),
+    });
+
+    return existing[0].id;
+  }
 
   const created = await clerk("/users", {
     method: "POST",
@@ -88,8 +103,20 @@ async function testUserId() {
  * rather than held — the same thing the browser client does per request.
  */
 async function sessionToken(sessionId) {
+  if (TOKEN_URL) {
+    const response = await fetch(TOKEN_URL);
+    const token = await response.text();
+
+    if (!response.ok || !token) {
+      throw new Error(`smoke token broker returned ${response.status}`);
+    }
+
+    return token;
+  }
+
   const minted = await clerk(`/sessions/${sessionId}/tokens`, {
     method: "POST",
+    headers: { Origin: SMOKE_FRONTEND_ORIGIN },
     body: JSON.stringify({ expires_in_seconds: 60 }),
   });
 
@@ -132,13 +159,24 @@ async function main() {
   console.log("  ", health.status, (await health.text()).slice(0, 120));
   assert(health.status === 200, "health did not return 200");
 
-  step("clerk test user", EMAIL);
-  const userId = await testUserId();
-  const session = await clerk("/sessions", {
-    method: "POST",
-    body: JSON.stringify({ user_id: userId }),
-  });
-  console.log("  test session minted");
+  let session;
+
+  if (TOKEN_URL) {
+    step("use Clerk browser token broker");
+    session = { id: "browser-session" };
+  } else if (EXISTING_SESSION_ID) {
+    step("reuse Clerk browser session");
+    session = { id: EXISTING_SESSION_ID };
+  } else {
+    step("clerk test user", EMAIL);
+    const userId = await testUserId();
+    session = await clerk("/sessions", {
+      method: "POST",
+      headers: { Origin: SMOKE_FRONTEND_ORIGIN },
+      body: JSON.stringify({ user_id: userId }),
+    });
+    console.log("  test session minted");
+  }
 
   step("unauthenticated /chats must be 401");
   const anon = await fetch(`${BACKEND}/api/v1/chats`);
@@ -156,6 +194,53 @@ async function main() {
         chats.body?.nextCursor === null),
     "chat list did not return the cursor envelope",
   );
+
+  if (INSPECT_RUN_ID) {
+    step("inspect Trigger run", INSPECT_RUN_ID);
+    const realtime = await api(
+      session.id,
+      `/runs/${INSPECT_RUN_ID}/realtime-token`,
+      { method: "POST" },
+    );
+    assert(realtime.status === 200, "realtime token refresh failed");
+
+    const response = await fetch(
+      `https://api.trigger.dev/api/v3/runs/${realtime.body.realtimeRunId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${realtime.body.realtimeToken}`,
+        },
+      },
+    );
+    const run = await response.json();
+    assert(response.ok, `Trigger run lookup returned ${response.status}`);
+    console.log(
+      JSON.stringify({
+        id: run.id,
+        status: run.status,
+        taskIdentifier: run.taskIdentifier,
+        version: run.version,
+        createdAt: run.createdAt,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+        attempts: run.attempts?.map((attempt) => ({
+          status: attempt.status,
+          startedAt: attempt.startedAt,
+          completedAt: attempt.completedAt,
+          error: attempt.error
+            ? {
+                name: attempt.error.name,
+                message: attempt.error.message,
+                stackTrace: attempt.error.stackTrace,
+              }
+            : undefined,
+        })),
+      }),
+      null,
+      2,
+    );
+    return;
+  }
 
   step("Zod rejection must not leak field names");
   const invalid = await api(session.id, "/messages", {

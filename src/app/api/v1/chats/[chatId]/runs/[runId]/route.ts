@@ -4,6 +4,7 @@ import { prisma } from "@/db/client";
 import { withAuth } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
 import { ensureRunDispatched } from "@/services/dispatchRun";
+import { reconcileTriggerTerminalState } from "@/services/triggerRunReconciliation";
 
 /**
  * REST reconciliation for a run.
@@ -23,7 +24,7 @@ export async function GET(
       return errorResponse("NOT_FOUND", { trace });
     }
 
-    const run = await prisma.agentRun.findFirst({
+    let run = await prisma.agentRun.findFirst({
       where: { id: runId, chatId },
     });
 
@@ -34,7 +35,11 @@ export async function GET(
       // after acceptance. Delivery is idempotent and failure does not hide the
       // authoritative queued state from the client.
       await ensureRunDispatched(run.id).catch(() => null);
+      run =
+        (await prisma.agentRun.findUnique({ where: { id: run.id } })) ?? run;
     }
+
+    run = await reconcileTriggerTerminalState(run);
 
     return jsonResponse(
       AgentRunStateSchema.parse({
