@@ -29,16 +29,54 @@ const CustomSizeSchema = z
   })
   .describe(
     "Exact output size. Width and height must each be 1024-3840 and a multiple of 16.",
-  );
+  )
+  .superRefine(({ width, height }, context) => {
+    if (width % 16 !== 0 || height % 16 !== 0) {
+      context.addIssue({
+        code: "custom",
+        message: "width and height must be multiples of 16",
+      });
+    }
+
+    if (Math.max(width, height) / Math.min(width, height) > 3) {
+      context.addIssue({
+        code: "custom",
+        message: "long-to-short ratio must be at most 3:1",
+      });
+    }
+
+    const pixels = width * height;
+
+    if (pixels < 655_360 || pixels > 8_294_400) {
+      context.addIssue({
+        code: "custom",
+        message: "total pixels must be between 655360 and 8294400",
+      });
+    }
+  });
+
+const PromptSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(4_000)
+  .describe("Required image instructions, up to 4000 characters.");
+
+const HttpsUrlSchema = z
+  .url()
+  .refine((value) => value.startsWith("https://"), "must use HTTPS");
 
 function withCustomSize<T extends z.ZodObject<z.ZodRawShape>>(schema: T) {
   return schema.extend({
+    prompt: PromptSchema,
     size: z.union([schema.shape.size as z.ZodTypeAny, CustomSizeSchema]),
   });
 }
 
 const textInput = withCustomSize(GptImage2TextInputSchema);
-const editInput = withCustomSize(GptImage2EditInputSchema);
+const editInput = withCustomSize(GptImage2EditInputSchema).extend({
+  uploadedImages: z.array(HttpsUrlSchema).min(1).max(10),
+});
 
 function nodeInput(
   input: Record<string, unknown>,
@@ -52,13 +90,25 @@ function nodeInput(
   };
 }
 
-function imageResult(toolName: string, output: Record<string, unknown>) {
+function imageResult(
+  toolName: string,
+  output: Record<string, unknown>,
+  input: Record<string, unknown> = {},
+) {
+  const format = input.output_format;
+  const mimeType =
+    format === "JPEG"
+      ? "image/jpeg"
+      : format === "WebP"
+        ? "image/webp"
+        : "image/png";
+
   return {
     type: "image" as const,
     urls: urlList(toolName, output, "result"),
     width: null,
     height: null,
-    mimeType: "image/png",
+    mimeType,
   };
 }
 
@@ -77,8 +127,8 @@ export const gptImage2Text: ToolDefinition<typeof textInput> = {
     return nodeInput(input, "gpt-image-2-text");
   },
 
-  toResult(output) {
-    return imageResult("gpt_image_2_text", output);
+  toResult(output, input) {
+    return imageResult("gpt_image_2_text", output, input);
   },
 };
 
@@ -97,7 +147,7 @@ export const gptImage2Edit: ToolDefinition<typeof editInput> = {
     return nodeInput(input, "gpt-image-2-edit");
   },
 
-  toResult(output) {
-    return imageResult("gpt_image_2_edit", output);
+  toResult(output, input) {
+    return imageResult("gpt_image_2_edit", output, input);
   },
 };

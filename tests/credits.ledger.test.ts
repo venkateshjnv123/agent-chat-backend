@@ -208,15 +208,19 @@ describe("settle", () => {
     expect(entries.filter((entry) => entry.kind === "SETTLE")).toHaveLength(1);
   });
 
-  it("records the real cost even when it overdraws the account", async () => {
+  it("records an uncovered overrun without making balance negative", async () => {
     account.balance = 60_000;
     await reserveCredits({ ...OWNER, amount: 50_000 });
 
-    await settleCredits({ ...OWNER, reserved: 50_000, actual: 90_000 });
+    const result = await settleCredits({
+      ...OWNER,
+      reserved: 50_000,
+      actual: 90_000,
+    });
 
-    // The provider already billed us. Refusing to record it would make our
-    // ledger disagree with reality; the next reserve is what stops the user.
-    expect(account.balance).toBe(-30_000);
+    expect(account.balance).toBe(0);
+    expect(result.uncovered).toBe(30_000);
+    expect(entries.at(-1)?.note).toContain("30000 provider credits uncovered");
   });
 });
 

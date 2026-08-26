@@ -116,6 +116,34 @@ describe("tool input validation", () => {
     ).toBe(true);
     expect(tool.input.safeParse({ prompt: "a red cube" }).success).toBe(true);
   });
+
+  it("rejects invalid GPT Image dimensions, blank prompts and empty edits", () => {
+    const text = getTool("gpt_image_2_text")!;
+    const edit = getTool("gpt_image_2_edit")!;
+
+    expect(
+      text.input.safeParse({
+        prompt: "image",
+        size: { width: 1920, height: 1080 },
+      }).success,
+    ).toBe(false);
+    expect(
+      text.input.safeParse({
+        prompt: "image",
+        size: { width: 3840, height: 3840 },
+      }).success,
+    ).toBe(false);
+    expect(text.input.safeParse({ prompt: "   " }).success).toBe(false);
+    expect(
+      edit.input.safeParse({ prompt: "edit", uploadedImages: [] }).success,
+    ).toBe(false);
+    expect(
+      edit.input.safeParse({
+        prompt: "edit",
+        uploadedImages: ["http://x.test/source.png"],
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe("node input mapping", () => {
@@ -176,6 +204,23 @@ describe("result mapping", () => {
         result: ["https://x.test/1.png", "https://x.test/2.png"],
       }),
     ).toMatchObject({ type: "image", urls: expect.any(Array) });
+  });
+
+  it("preserves GPT Image JPEG and WebP MIME metadata", () => {
+    const tool = getTool("gpt_image_2_text")!;
+
+    expect(
+      tool.toResult(
+        { result: ["https://x.test/result"] },
+        { output_format: "JPEG" },
+      ),
+    ).toMatchObject({ mimeType: "image/jpeg" });
+    expect(
+      tool.toResult(
+        { result: ["https://x.test/result"] },
+        { output_format: "WebP" },
+      ),
+    ).toMatchObject({ mimeType: "image/webp" });
   });
 
   it("fails loudly when the provider returns no usable URL", () => {

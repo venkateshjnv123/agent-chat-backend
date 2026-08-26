@@ -100,6 +100,7 @@ export async function claimToolCall(options: ClaimToolCallOptions): Promise<
     }
   | { status: "settled"; execution: ToolExecution }
   | { status: "insufficient_credits"; execution: ToolExecution }
+  | { status: "in_flight"; invocationId: string }
 > {
   const definition = getTool(options.toolName);
 
@@ -135,7 +136,11 @@ export async function claimToolCall(options: ClaimToolCallOptions): Promise<
     input,
   );
 
-  if (claim.replayed) return { status: "settled", execution: claim.execution };
+  if (claim.replayed) {
+    return claim.execution
+      ? { status: "settled", execution: claim.execution }
+      : { status: "in_flight", invocationId: claim.invocationId };
+  }
 
   const nodeInput = definition.toNodeInput(parsed.data);
 
@@ -230,7 +235,7 @@ export async function runClaimedTool(
 
   const existing = await prisma.toolInvocation.findUnique({
     where: { id: invocationId },
-    select: { toolName: true, externalRunId: true },
+    select: { toolName: true, externalRunId: true, sanitizedInput: true },
   });
 
   if (!existing) throw new Error("tool_invocation_missing");
@@ -302,7 +307,14 @@ export async function runClaimedTool(
 
     const run = await pollToTerminal(externalRunId, options);
 
-    return await settle(await finish(definition, invocationId, run));
+    return await settle(
+      await finish(
+        definition,
+        invocationId,
+        run,
+        asRecord(existing.sanitizedInput),
+      ),
+    );
   } catch (error) {
     return await settle(await fail(invocationId, error));
   }
@@ -346,21 +358,44 @@ async function claim_(
     return {
       replayed: true as const,
       invocationId: existing.id,
-      execution: {
-        invocationId: existing.id,
-        state: (existing.state === "COMPLETED" ||
-        existing.state === "FAILED" ||
-        existing.state === "CANCELLED"
-          ? existing.state
-          : "FAILED") as ToolExecution["state"],
-        result: existing.result ?? null,
-        errorCode: existing.errorCode,
-        userMessage: existing.userMessage,
-        creditUsed: existing.creditUsed,
-        deduped: true,
-      },
+      execution: terminalExecution(existing, true),
     };
   }
+}
+
+/** Reads a replayed paid child only after it has genuinely reached terminal. */
+export async function readTerminalToolExecution(
+  invocationId: string,
+): Promise<ToolExecution | null> {
+  const row = await prisma.toolInvocation.findUnique({
+    where: { id: invocationId },
+  });
+
+  return row ? terminalExecution(row, true) : null;
+}
+
+function terminalExecution(
+  row: {
+    id: string;
+    state: string;
+    result: unknown;
+    errorCode: string | null;
+    userMessage: string | null;
+    creditUsed: number;
+  },
+  deduped: boolean,
+): ToolExecution | null {
+  if (!["COMPLETED", "FAILED", "CANCELLED"].includes(row.state)) return null;
+
+  return {
+    invocationId: row.id,
+    state: row.state as ToolExecution["state"],
+    result: row.result ?? null,
+    errorCode: row.errorCode,
+    userMessage: row.userMessage,
+    creditUsed: row.creditUsed,
+    deduped,
+  };
 }
 
 /**
@@ -423,6 +458,7 @@ async function finish(
   definition: ToolDefinition,
   invocationId: string,
   run: MagicaRun,
+  input: Record<string, unknown>,
 ): Promise<ToolExecution> {
   if (run.status !== "COMPLETED") {
     const cancelled = run.status === "CANCELLED";
@@ -446,7 +482,9 @@ async function finish(
   try {
     // Parsed against the same schema the frontend uses, so a shape the renderer
     // cannot draw fails here rather than in the browser.
-    result = ToolResultSchema.parse(definition.toResult(run.output ?? {}));
+    result = ToolResultSchema.parse(
+      definition.toResult(run.output ?? {}, input),
+    );
   } catch (error) {
     const outputError = error instanceof ToolOutputError;
 
@@ -470,6 +508,12 @@ async function finish(
     result,
     resultUrl: "urls" in result ? (result.urls[0] ?? null) : null,
   });
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 async function fail(

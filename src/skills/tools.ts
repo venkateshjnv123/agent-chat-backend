@@ -89,19 +89,60 @@ const ReadSkillAssetOutput = z.object({
 async function recordLoad(
   runId: string,
   skill: Skill,
-): Promise<{ alreadyLoaded: boolean }> {
+): Promise<{
+  alreadyLoaded: boolean;
+  contentHash: string;
+  instructions: string;
+}> {
   const existing = await prisma.runSkill.findUnique({
     where: { runId_name: { runId, name: skill.name } },
-    select: { contentHash: true },
+    select: { contentHash: true, content: true },
   });
 
-  if (existing) return { alreadyLoaded: true };
+  if (existing?.content) {
+    return {
+      alreadyLoaded: true,
+      contentHash: existing.contentHash,
+      instructions: existing.content,
+    };
+  }
+
+  if (existing) {
+    // Legacy rows can be repaired only while their saved hash still matches.
+    // Guessing after a deploy would silently change a resumed run's guidance.
+    if (existing.contentHash !== skill.contentHash) {
+      throw new SkillError(
+        "skill_version_unavailable",
+        `The saved version of skill "${skill.name}" is no longer available. Start a new turn to use the current version.`,
+      );
+    }
+
+    await prisma.runSkill.update({
+      where: { runId_name: { runId, name: skill.name } },
+      data: { content: skill.body },
+    });
+
+    return {
+      alreadyLoaded: true,
+      contentHash: skill.contentHash,
+      instructions: skill.body,
+    };
+  }
 
   await prisma.runSkill.create({
-    data: { runId, name: skill.name, contentHash: skill.contentHash },
+    data: {
+      runId,
+      name: skill.name,
+      contentHash: skill.contentHash,
+      content: skill.body,
+    },
   });
 
-  return { alreadyLoaded: false };
+  return {
+    alreadyLoaded: false,
+    contentHash: skill.contentHash,
+    instructions: skill.body,
+  };
 }
 
 export const loadSkill: LocalToolDefinition<
@@ -118,13 +159,13 @@ export const loadSkill: LocalToolDefinition<
 
   async execute(input, context) {
     const skill = getSkill(input.name, context.registry ?? skillRegistry());
-    const { alreadyLoaded } = await recordLoad(context.runId, skill);
+    const loaded = await recordLoad(context.runId, skill);
 
     return LoadSkillOutput.parse({
       name: skill.name,
-      contentHash: skill.contentHash,
-      instructions: skill.body,
-      alreadyLoaded,
+      contentHash: loaded.contentHash,
+      instructions: loaded.instructions,
+      alreadyLoaded: loaded.alreadyLoaded,
     });
   },
 };
@@ -231,5 +272,37 @@ export function skillsPromptSection(
     "work. Do not guess at a skill's contents from its description.",
     "",
     ...lines,
+  ].join("\n");
+}
+
+/**
+ * Rehydrates exactly the skill bodies loaded by a prior attempt.
+ *
+ * Tool messages are not stored in chat history, so without this section an
+ * explicit retry remembers the row but loses the actual guidance. Nullable
+ * legacy rows are skipped because their hash is proof, not reconstructable text.
+ */
+export async function restoredSkillsPrompt(runId: string): Promise<string> {
+  const rows = await prisma.runSkill.findMany({
+    where: { runId, content: { not: null } },
+    orderBy: [{ loadedAt: "asc" }, { name: "asc" }],
+    select: { name: true, contentHash: true, content: true },
+  });
+  const loaded = rows.filter((row): row is typeof row & { content: string } =>
+    Boolean(row.content),
+  );
+
+  if (loaded.length === 0) return "";
+
+  return [
+    "## Skills already loaded for this run",
+    "",
+    "Use these immutable saved instructions; do not reload them from disk.",
+    ...loaded.flatMap((row) => [
+      "",
+      `### ${row.name} (${row.contentHash})`,
+      "",
+      row.content,
+    ]),
   ].join("\n");
 }

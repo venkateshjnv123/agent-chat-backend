@@ -236,6 +236,8 @@ model RunSkill {
   runId       String
   name        String
   contentHash String
+  /// Immutable guidance used by this run; retries never reread a changed file.
+  content     String?  @db.Text
   loadedAt    DateTime @default(now())
 
   run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)

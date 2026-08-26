@@ -62,7 +62,8 @@ export class SkillError extends Error {
       | "skill_not_found"
       | "skill_asset_not_found"
       | "skill_asset_forbidden"
-      | "skill_asset_too_large",
+      | "skill_asset_too_large"
+      | "skill_version_unavailable",
     message: string,
   ) {
     super(message);

@@ -96,7 +96,8 @@ vi.mock("@/magica/client", async (importOriginal) => {
   };
 });
 
-const { claimToolCall, runClaimedTool } = await import("@/tools/execute");
+const { claimToolCall, readTerminalToolExecution, runClaimedTool } =
+  await import("@/tools/execute");
 
 const CROP_INPUT = {
   image_url: "https://x.test/in.png",
@@ -157,6 +158,14 @@ async function call(overrides: Record<string, unknown> = {}) {
     ...claimOverrides,
   });
 
+  if (claim.status === "in_flight") {
+    const execution = await readTerminalToolExecution(claim.invocationId);
+
+    if (!execution) throw new Error("test child still in flight");
+
+    return execution;
+  }
+
   if (claim.status !== "claimed") return claim.execution;
 
   return runClaimedTool({
@@ -211,6 +220,32 @@ describe("executeTool", () => {
     // The second call must never reach the provider: Magica does not dedupe.
     expect(dispatchNodeRun).toHaveBeenCalledTimes(1);
     expect(rows.size).toBe(1);
+  });
+
+  it("reports a duplicate pending child as in-flight, never failed", async () => {
+    const first = await claimToolCall({
+      runId: "run_a",
+      ownerId: "user_a",
+      messageId: "msg_a",
+      toolName: "crop_image",
+      toolCallId: "call_1",
+      rawInput: CROP_INPUT,
+    });
+    const replay = await claimToolCall({
+      runId: "run_a",
+      ownerId: "user_a",
+      messageId: "msg_a",
+      toolName: "crop_image",
+      toolCallId: "call_1",
+      rawInput: CROP_INPUT,
+    });
+
+    expect(first.status).toBe("claimed");
+    expect(replay).toMatchObject({
+      status: "in_flight",
+      invocationId: first.status === "claimed" ? first.invocationId : "",
+    });
+    expect(dispatchNodeRun).not.toHaveBeenCalled();
   });
 
   it("treats a different tool call in the same run as a separate execution", async () => {

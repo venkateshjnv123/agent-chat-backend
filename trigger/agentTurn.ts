@@ -37,10 +37,15 @@ import { openAssistantTextStream } from "./textStream";
 import {
   claimToolCall,
   executionKeyFor,
+  readTerminalToolExecution,
   type ToolExecution,
 } from "@/tools/execute";
 import type { PlanPayload } from "@/contracts/waitpoint";
-import { getLocalTool, runLocalTool } from "@/skills/tools";
+import {
+  getLocalTool,
+  restoredSkillsPrompt,
+  runLocalTool,
+} from "@/skills/tools";
 
 export type AgentTurnPayload = {
   chatId: string;
@@ -143,8 +148,14 @@ export const agentTurn = task({
       // derived from the skill registry, and a resume should see the registry
       // as it is now. What the run must reproduce exactly is the guidance it
       // loaded, and RunSkill rows carry that.
+      const restoredSkills = await restoredSkillsPrompt(payload.runId);
       const conversation: AgentMessage[] = [
-        { role: "system", content: buildSystemPrompt() },
+        {
+          role: "system",
+          content: [buildSystemPrompt(), restoredSkills]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
         ...history,
       ];
       const blocks: ContentBlock[] = [];
@@ -425,6 +436,7 @@ async function runToolCalls(
     payload: Parameters<typeof magicaTool.trigger>[0];
     idempotencyKey: string;
   }[] = [];
+  const inFlight: { toolCallId: string; invocationId: string }[] = [];
 
   for (const call of toolCalls) {
     // Local tools read guidance and spend nothing, so they neither claim an
@@ -460,6 +472,14 @@ async function runToolCalls(
       rawInput: call.input,
     });
 
+    if (claim.status === "in_flight") {
+      inFlight.push({
+        toolCallId: call.id,
+        invocationId: claim.invocationId,
+      });
+      continue;
+    }
+
     // A step that could not be afforded is settled, not dispatched. The turn
     // continues so the model can explain the shortfall and whatever already
     // succeeded is preserved.
@@ -486,42 +506,76 @@ async function runToolCalls(
     });
   }
 
-  if (pending.length === 0) return executions;
+  if (pending.length > 0) {
+    const results = await batch.triggerAndWait<typeof magicaTool>(
+      pending.map((item) => ({
+        id: "magica-tool" as const,
+        payload: item.payload,
+        // Second layer under our unique index: a redelivered batch must not
+        // enqueue the same paid execution twice.
+        options: { idempotencyKey: item.idempotencyKey },
+      })),
+    );
 
-  const results = await batch.triggerAndWait<typeof magicaTool>(
-    pending.map((item) => ({
-      id: "magica-tool" as const,
-      payload: item.payload,
-      // Second layer under our unique index: a redelivered batch must not
-      // enqueue the same paid execution twice.
-      options: { idempotencyKey: item.idempotencyKey },
-    })),
-  );
+    results.runs.forEach((run, index) => {
+      const item = pending[index];
 
-  results.runs.forEach((run, index) => {
-    const item = pending[index];
+      if (run.ok) {
+        executions.set(item.toolCallId, toTurnResult(run.output));
+        return;
+      }
 
-    if (run.ok) {
-      executions.set(item.toolCallId, toTurnResult(run.output));
-      return;
-    }
-
-    // The child persists its own failures, so reaching here means the task
-    // itself did not complete. The row stays non-terminal and reconciliation
-    // owns it; the model is told the step failed.
-    logger.error("tool task did not complete", {
-      runId: payload.runId,
-      invocationId: item.payload.invocationId,
+      // A parent retry joins this non-terminal row. It must not tell the model
+      // a paid child failed while that child can still complete.
+      logger.error("tool task did not complete", {
+        runId: payload.runId,
+        invocationId: item.payload.invocationId,
+      });
+      inFlight.push({
+        toolCallId: item.toolCallId,
+        invocationId: item.payload.invocationId,
+      });
     });
+  }
 
-    executions.set(item.toolCallId, {
-      state: "FAILED",
-      result: null,
-      userMessage: "That step could not be completed.",
-    });
-  });
+  if (inFlight.length > 0) {
+    await joinInFlightTools(payload.runId, inFlight, executions);
+  }
 
   return executions;
+}
+
+/** Joins paid children found by a replay without inventing a failed result. */
+async function joinInFlightTools(
+  runId: string,
+  inFlight: { toolCallId: string; invocationId: string }[],
+  executions: Map<string, TurnToolResult>,
+): Promise<void> {
+  const remaining = new Map(
+    inFlight.map((item) => [item.invocationId, item.toolCallId]),
+  );
+  const deadline = Date.now() + 10 * 60 * 1_000;
+
+  while (remaining.size > 0) {
+    for (const [invocationId, toolCallId] of remaining) {
+      const execution = await readTerminalToolExecution(invocationId);
+
+      if (execution) {
+        executions.set(toolCallId, toTurnResult(execution));
+        remaining.delete(invocationId);
+      }
+    }
+
+    if (remaining.size === 0 || (await cancellationRequested(runId))) return;
+
+    if (Date.now() >= deadline) {
+      throw new TransientProviderError("tool_execution_still_running");
+    }
+
+    // Trigger checkpoints this wait, so joining a child does not occupy the
+    // agent worker for the duration of the media run.
+    await wait.for({ seconds: 1 });
+  }
 }
 
 function toTurnResult(execution: ToolExecution): TurnToolResult {

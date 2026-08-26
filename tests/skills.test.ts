@@ -16,13 +16,20 @@ import {
 
 const runSkill = {
   findUnique: vi.fn(),
+  findMany: vi.fn(),
   create: vi.fn(),
+  update: vi.fn(),
 };
 
 vi.mock("@/db/client", () => ({ prisma: { runSkill } }));
 
-const { loadSkill, readSkillAssetTool, runLocalTool, skillsPromptSection } =
-  await import("@/skills/tools");
+const {
+  loadSkill,
+  readSkillAssetTool,
+  restoredSkillsPrompt,
+  runLocalTool,
+  skillsPromptSection,
+} = await import("@/skills/tools");
 
 function frontmatter(name: string, description: string) {
   return `---\nname: ${name}\ndescription: ${description}\n---\n\nDo the thing carefully.\n`;
@@ -53,7 +60,9 @@ function skill(
 
 beforeEach(() => {
   runSkill.findUnique.mockReset().mockResolvedValue(null);
+  runSkill.findMany.mockReset().mockResolvedValue([]);
   runSkill.create.mockReset().mockResolvedValue({});
+  runSkill.update.mockReset().mockResolvedValue({});
 });
 
 describe("selective loading", () => {
@@ -269,6 +278,7 @@ describe("deduplication", () => {
 
     runSkill.findUnique.mockResolvedValue({
       contentHash: getSkill("alpha-skill", skills).contentHash,
+      content: "Do the thing carefully.",
     });
 
     const second = await runLocalTool(
@@ -304,6 +314,52 @@ describe("durable resume", () => {
 
     expect(persisted).toMatch(/^[0-9a-f]{64}$/);
     expect(getSkill("alpha-skill", reread).contentHash).toBe(persisted);
+    expect(runSkill.create.mock.calls[0][0].data.content).toBe(
+      "Do the thing carefully.",
+    );
+  });
+
+  it("returns and restores the immutable saved body after a deploy", async () => {
+    const { skills } = root((dir) =>
+      skill(
+        dir,
+        "alpha-skill",
+        `---\nname: alpha-skill\ndescription: ${DESCRIPTION}\n---\n\nNew instructions.\n`,
+      ),
+    );
+    const oldHash = "a".repeat(64);
+
+    runSkill.findUnique.mockResolvedValue({
+      contentHash: oldHash,
+      content: "Original saved instructions.",
+    });
+    runSkill.findMany.mockResolvedValue([
+      {
+        name: "alpha-skill",
+        contentHash: oldHash,
+        content: "Original saved instructions.",
+      },
+    ]);
+
+    const outcome = await runLocalTool(
+      loadSkill,
+      { name: "alpha-skill" },
+      { runId: "run_1", registry: skills },
+    );
+
+    expect(outcome).toMatchObject({
+      ok: true,
+      output: {
+        contentHash: oldHash,
+        instructions: "Original saved instructions.",
+        alreadyLoaded: true,
+      },
+    });
+
+    const prompt = await restoredSkillsPrompt("run_1");
+
+    expect(prompt).toContain("Original saved instructions.");
+    expect(prompt).not.toContain("New instructions.");
   });
 
   it("changes the hash when the guidance changes", () => {

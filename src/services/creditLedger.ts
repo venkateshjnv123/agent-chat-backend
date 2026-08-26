@@ -201,10 +201,9 @@ export async function reserveCredits(options: {
  * the difference comes back as a separate REFUND row; when it was too mean the
  * shortfall is charged on the SETTLE row itself.
  *
- * Settlement deliberately does not check the balance. The work is done and the
- * provider has already billed us — refusing to record it would make our ledger
- * disagree with reality. An overrun can push the balance below zero, and the
- * next reserve is what stops the user going further.
+ * A provider overrun is collected only up to the remaining balance. The real
+ * provider cost remains on ToolInvocation and the uncovered amount is named in
+ * the settlement note, while the spendable account never becomes negative.
  */
 export async function settleCredits(options: {
   ownerId: string;
@@ -214,7 +213,12 @@ export async function settleCredits(options: {
   actual: number;
   toolName?: string | null;
   note?: string | null;
-}): Promise<{ settled: number; refunded: number; replayed: boolean }> {
+}): Promise<{
+  settled: number;
+  refunded: number;
+  uncovered: number;
+  replayed: boolean;
+}> {
   const reserved = Math.max(0, Math.trunc(options.reserved));
   const actual = Math.max(0, Math.trunc(options.actual));
   const settleKey = opKeyFor(options, "SETTLE");
@@ -227,29 +231,37 @@ export async function settleCredits(options: {
         select: { id: true },
       });
 
-      if (already) return { settled: actual, refunded: 0, replayed: true };
+      if (already) {
+        return { settled: actual, refunded: 0, uncovered: 0, replayed: true };
+      }
 
       // Negative when the provider undercharged relative to the reservation.
       const correction = actual - reserved;
+      const collected =
+        correction > 0 ? Math.min(correction, Math.max(0, account.balance)) : 0;
+      const uncovered = correction > 0 ? correction - collected : 0;
+      const baseNote =
+        options.note ?? `charged ${actual} against a ${reserved} reservation`;
 
       await tx.creditLedgerEntry.create({
         data: {
           accountId: account.id,
           runId: options.runId,
-          delta: correction > 0 ? -correction : 0,
+          delta: -collected,
           kind: "SETTLE",
           opKey: settleKey,
           toolName: options.toolName ?? null,
           note:
-            options.note ??
-            `charged ${actual} against a ${reserved} reservation`,
+            uncovered > 0
+              ? `${baseNote}; ${uncovered} provider credits uncovered`
+              : baseNote,
         },
       });
 
-      if (correction > 0) {
+      if (collected > 0) {
         await tx.creditAccount.update({
           where: { id: account.id },
-          data: { balance: { decrement: correction } },
+          data: { balance: { decrement: collected } },
         });
       }
 
@@ -275,13 +287,14 @@ export async function settleCredits(options: {
       return {
         settled: actual,
         refunded: correction < 0 ? -correction : 0,
+        uncovered,
         replayed: false,
       };
     });
   } catch (error) {
     if (!isReplay(error)) throw error;
 
-    return { settled: actual, refunded: 0, replayed: true };
+    return { settled: actual, refunded: 0, uncovered: 0, replayed: true };
   }
 }
 

@@ -23,8 +23,11 @@ export type ToolDefinition<Input extends z.ZodType = z.ZodType> = {
   readonly input: Input;
   /** Validated input → Magica request body. */
   toNodeInput(input: z.infer<Input>): Record<string, unknown>;
-  /** Magica `output` → provider-neutral result. */
-  toResult(output: Record<string, unknown>): ToolResult;
+  /** Magica output plus persisted validated input → provider-neutral result. */
+  toResult(
+    output: Record<string, unknown>,
+    input?: Record<string, unknown>,
+  ): ToolResult;
   /**
    * Fields dropped before the input is persisted or shown.
    *
