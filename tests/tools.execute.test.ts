@@ -308,6 +308,11 @@ describe("executeTool", () => {
 
     expect(execution.state).toBe("FAILED");
     expect(execution.errorCode).toBe("tool_timeout");
+    expect(execution.creditUsed).toBe(5_000);
+    expect(settleCredits).toHaveBeenCalledWith(
+      expect.objectContaining({ reserved: 5_000, actual: 5_000 }),
+    );
+    expect(refundReservation).not.toHaveBeenCalled();
   });
 
   it("stops polling when the run is cancelled", async () => {
@@ -324,6 +329,8 @@ describe("executeTool", () => {
 
     expect(execution.state).toBe("CANCELLED");
     expect(execution.errorCode).toBe("tool_cancelled");
+    expect(execution.creditUsed).toBe(5_000);
+    expect(refundReservation).not.toHaveBeenCalled();
   });
 
   it("records an unusable provider output as a failed step", async () => {

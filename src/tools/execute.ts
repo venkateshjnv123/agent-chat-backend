@@ -283,6 +283,8 @@ export async function runClaimedTool(
     return execution;
   }
 
+  let providerAccepted = Boolean(existing.externalRunId);
+
   try {
     let externalRunId = existing.externalRunId;
 
@@ -294,6 +296,7 @@ export async function runClaimedTool(
       });
 
       externalRunId = dispatch.runId;
+      providerAccepted = true;
 
       await prisma.toolInvocation.update({
         where: { id: invocationId },
@@ -316,7 +319,16 @@ export async function runClaimedTool(
       ),
     );
   } catch (error) {
-    return await settle(await fail(invocationId, error));
+    // Magica has no cancellation endpoint. Once it accepted a run, timeout or
+    // parent cancellation cannot truthfully be treated as zero-cost work. Keep
+    // the reservation as the conservative settled charge instead of refunding
+    // locally while remote processing may continue.
+    return await settle(
+      await fail(invocationId, error, {
+        providerAccepted,
+        creditUsed: providerAccepted ? options.reserved : 0,
+      }),
+    );
   }
 }
 
@@ -519,13 +531,16 @@ function asRecord(value: unknown): Record<string, unknown> {
 async function fail(
   invocationId: string,
   error: unknown,
+  options: { providerAccepted: boolean; creditUsed: number },
 ): Promise<ToolExecution> {
   if (isAbort(error)) {
     return persist(invocationId, {
       state: "CANCELLED",
       errorCode: "tool_cancelled",
-      userMessage: "That step was cancelled.",
-      creditUsed: 0,
+      userMessage: options.providerAccepted
+        ? "The chat stopped after the media provider accepted this step, so its reserved credits were kept."
+        : "That step was cancelled.",
+      creditUsed: options.creditUsed,
       result: null,
       resultUrl: null,
     });
@@ -537,9 +552,11 @@ async function fail(
     state: "FAILED",
     errorCode: magica ? error.code : "tool_dispatch_failed",
     userMessage: magica
-      ? error.userMessage
+      ? error.code === "tool_timeout" && options.providerAccepted
+        ? "That step exceeded the wait limit after the provider accepted it, so its reserved credits were kept."
+        : error.userMessage
       : "That step couldn't be completed.",
-    creditUsed: 0,
+    creditUsed: options.creditUsed,
     result: null,
     resultUrl: null,
   });
