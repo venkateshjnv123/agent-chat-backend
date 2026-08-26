@@ -268,6 +268,5 @@ tests/                contract, service, recovery, and integration tests
 4. Media lifecycle management - integrate S3 or any object storage to make the files durable and maintainable easily
 5. Integrate and handling the turns using webhooks
 6. Currently skills are scalable but feeding them to openRouter is not scalable now i guess for 1000 skills - we need to check another way maybe make them lightweight.
-7.
 
 See [AGENTS.md](./AGENTS.md) for repository constraints and required engineering invariants.
