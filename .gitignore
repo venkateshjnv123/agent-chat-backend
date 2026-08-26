@@ -19,7 +19,9 @@
 
 # production
 /build
-/src/generated/prisma
+# Trigger's native build server bundles source before build extensions run.
+# Keep the Prisma 7 TypeScript client in git so production workers can resolve
+# @/generated/prisma/client during that first bundle pass.
 
 # misc
 .DS_Store
