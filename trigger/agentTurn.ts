@@ -22,6 +22,7 @@ import {
 import { getTool } from "@/tools/registry";
 import type { ContentBlock } from "@/contracts/chat";
 import { magicaTool } from "./magicaTool";
+import { openAssistantTextStream } from "./textStream";
 import {
   claimToolCall,
   executionKeyFor,
@@ -88,6 +89,12 @@ export const agentTurn = task({
 
     metadata.set("status", "running");
 
+    // Token-by-token delivery. Separate from run metadata so status and text
+    // travel on their own channels, and best-effort so a stream that cannot
+    // open never costs the turn. Opened outside the try because a failed turn
+    // must close it too.
+    const textStream = await openAssistantTextStream(log);
+
     try {
       const history = await restoreConversation(
         payload.chatId,
@@ -138,6 +145,7 @@ export const agentTurn = task({
           if (chunk.type === "text") {
             turnText += chunk.text;
             text += chunk.text;
+            textStream.push({ turn: turns, text: chunk.text });
             metadata.set("streamedCharacters", text.length);
           } else {
             routedModel = chunk.routedModel ?? routedModel;
@@ -263,6 +271,11 @@ export const agentTurn = task({
         });
       }
 
+      // The text channel closes before the durable write so a subscriber stops
+      // waiting for deltas and falls back to the persisted message, which is
+      // about to become the complete one.
+      textStream.close();
+
       // Terminal state lands in one transaction: a client that reads after this
       // commit sees a complete turn, never a half-written one.
       await prisma.$transaction([
@@ -306,6 +319,7 @@ export const agentTurn = task({
 
       return { runId: payload.runId, characters: text.length };
     } catch (error) {
+      textStream.close();
       await failRun(payload, error);
       throw error;
     }
