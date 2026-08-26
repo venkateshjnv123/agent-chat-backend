@@ -23,6 +23,7 @@ type Row = {
   resolvedAt: Date | null;
   expiresAt: Date;
   ownerId: string;
+  payload: unknown;
 };
 
 let row: Row;
@@ -119,8 +120,7 @@ const waitpoint = {
 
 vi.mock("@/db/client", () => ({ prisma: { waitpoint } }));
 
-const { WaitpointError, resolvePlanWaitpoint } =
-  await import("@/services/waitpoints");
+const { resolvePlanWaitpoint } = await import("@/services/waitpoints");
 
 beforeEach(() => {
   row = {
@@ -137,6 +137,9 @@ beforeEach(() => {
     resolvedAt: null,
     expiresAt: new Date(Date.now() + 60_000),
     ownerId: "user_a",
+    payload: {
+      steps: [{ id: "step_1", toolName: "crop_image" }],
+    },
   };
   vi.clearAllMocks();
 });
@@ -176,12 +179,40 @@ describe("resolving a plan", () => {
     });
   });
 
-  it("refuses a resolution the plan does not offer", async () => {
-    // STEP_BY_STEP is contract-valid but unimplemented, so it is not offered
-    // and must not be accepted through a hand-built request.
+  it("rejects an empty change request at the service boundary", async () => {
+    await expect(
+      resolvePlanWaitpoint({
+        ...APPROVE,
+        resolution: "REQUEST_CHANGES",
+        feedback: "   ",
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(completeToken).not.toHaveBeenCalled();
+  });
+
+  it("accepts STEP_BY_STEP and durably releases one step", async () => {
+    const outcome = await resolvePlanWaitpoint({
+      ...APPROVE,
+      resolution: "STEP_BY_STEP",
+    });
+
+    expect(outcome).toMatchObject({
+      status: "RESOLVED",
+      resolution: "STEP_BY_STEP",
+      applied: true,
+    });
+    expect(completeToken).toHaveBeenCalledWith("tok_1", {
+      resolution: "STEP_BY_STEP",
+      feedback: null,
+    });
+  });
+
+  it("rejects STEP_BY_STEP for a legacy checkpointed card", async () => {
+    row.payload = { steps: [{ n: 1, title: "Crop image" }] };
+
     await expect(
       resolvePlanWaitpoint({ ...APPROVE, resolution: "STEP_BY_STEP" }),
-    ).rejects.toBeInstanceOf(WaitpointError);
+    ).rejects.toMatchObject({ status: 400 });
     expect(completeToken).not.toHaveBeenCalled();
   });
 });

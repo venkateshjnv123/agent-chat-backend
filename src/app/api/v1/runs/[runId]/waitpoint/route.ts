@@ -3,7 +3,10 @@ import { prisma } from "@/db/client";
 import { withAuth } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
 import { findOwnedRun } from "@/services/runs";
-import { SUPPORTED_RESOLUTIONS } from "@/services/waitpoints";
+import {
+  SUPPORTED_RESOLUTIONS,
+  isExecutionGraphPlan,
+} from "@/services/waitpoints";
 
 /**
  * The plan a run is currently waiting on, if any.
@@ -43,7 +46,11 @@ export async function GET(
             : waitpoint.status,
         payload: waitpoint.payload,
         resolution: waitpoint.resolution,
-        supportedResolutions: SUPPORTED_RESOLUTIONS,
+        // Historical cards created before step execution shipped must not
+        // expose an action their checkpointed worker cannot understand.
+        supportedResolutions: isExecutionGraphPlan(waitpoint.payload)
+          ? SUPPORTED_RESOLUTIONS
+          : ["RUN_ALL", "REQUEST_CHANGES"],
         expiresAt: waitpoint.expiresAt.toISOString(),
         resolvedAt: waitpoint.resolvedAt?.toISOString() ?? null,
         createdAt: waitpoint.createdAt.toISOString(),

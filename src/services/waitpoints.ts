@@ -22,15 +22,9 @@ import { prisma } from "@/db/client";
 const EXPIRY_MS = 60 * 60 * 1000;
 const DELIVERY_LEASE_MS = 30_000;
 
-/**
- * `STEP_BY_STEP` is not implemented, so it is not offered.
- *
- * The client renders the buttons this list names rather than a hard-coded set,
- * which is what stops an unsupported action being shown and then silently
- * downgraded to something else.
- */
 export const SUPPORTED_RESOLUTIONS: PlanResolution[] = [
   "RUN_ALL",
+  "STEP_BY_STEP",
   "REQUEST_CHANGES",
 ];
 
@@ -121,6 +115,7 @@ export async function resolvePlanWaitpoint(options: {
       resolutionKey: true,
       deliveryClaimedAt: true,
       expiresAt: true,
+      payload: true,
       run: { select: { chat: { select: { userId: true } } } },
     },
   });
@@ -176,7 +171,29 @@ export async function resolvePlanWaitpoint(options: {
     );
   }
 
-  const feedback = options.feedback ?? null;
+  if (
+    options.resolution === "STEP_BY_STEP" &&
+    !isExecutionGraphPlan(waitpoint.payload)
+  ) {
+    throw new WaitpointError(
+      "waitpoint_forbidden",
+      400,
+      "That option isn't available on this plan.",
+    );
+  }
+
+  const feedback =
+    options.resolution === "REQUEST_CHANGES"
+      ? (options.feedback?.trim() ?? "")
+      : null;
+
+  if (options.resolution === "REQUEST_CHANGES" && !feedback) {
+    throw new WaitpointError(
+      "waitpoint_forbidden",
+      400,
+      "Say what you want changed.",
+    );
+  }
 
   if (waitpoint.resolutionKey) {
     assertSameDecision(waitpoint, {
@@ -367,4 +384,34 @@ export async function expirePlanWaitpoint(waitpointId: string): Promise<void> {
     where: { id: waitpointId, status: "PENDING" },
     data: { status: "EXPIRED" },
   });
+}
+
+/** Persists step progress on the exact historical card that released it. */
+export async function updatePlanWaitpointPayload(
+  waitpointId: string,
+  plan: PlanPayload,
+): Promise<void> {
+  const payload = PlanPayloadSchema.parse(plan);
+
+  await prisma.waitpoint.update({
+    where: { id: waitpointId },
+    data: { payload: payload as never },
+  });
+}
+
+/** Version guard for cards checkpointed before executable graphs shipped. */
+export function isExecutionGraphPlan(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const steps = (payload as Record<string, unknown>).steps;
+  return (
+    Array.isArray(steps) &&
+    steps.length > 0 &&
+    steps.every(
+      (step) =>
+        step !== null &&
+        typeof step === "object" &&
+        typeof (step as Record<string, unknown>).id === "string" &&
+        typeof (step as Record<string, unknown>).toolName === "string",
+    )
+  );
 }

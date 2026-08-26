@@ -14,21 +14,20 @@ import { OpenRouterProvider } from "@/agent/providers/openrouter";
 import { PermanentProviderError, TransientProviderError } from "@/agent/retry";
 import { agentToolSchemas } from "@/agent/tools";
 import { prisma } from "@/db/client";
-import { estimateCredits } from "@/magica/client";
 import { recordModelUsage } from "@/services/creditLedger";
-import { formatEstimate } from "@/services/credits";
 import { finalizeCancelledRun } from "@/services/cancelRun";
 import {
   checkpointAssistantText,
   STREAM_CHECKPOINT_CHARACTERS,
   STREAM_CHECKPOINT_INTERVAL_MS,
 } from "@/services/messageStream";
-import { callFingerprint, needsPlanApproval } from "@/services/planGate";
+import { needsPlanApproval } from "@/services/planGate";
 import {
   acknowledgePlanResolution,
   createPlanWaitpoint,
   expirePlanWaitpoint,
   type PlanDecision,
+  updatePlanWaitpointPayload,
 } from "@/services/waitpoints";
 import { getTool } from "@/tools/registry";
 import type { ContentBlock } from "@/contracts/chat";
@@ -41,6 +40,12 @@ import {
   type ToolExecution,
 } from "@/tools/execute";
 import type { PlanPayload } from "@/contracts/waitpoint";
+import {
+  buildCompleteExecutionPlan,
+  buildPlanFromCalls,
+  markPlanStep,
+  planCoversCalls,
+} from "@/services/executionPlan";
 import {
   getLocalTool,
   restoredSkillsPrompt,
@@ -173,13 +178,43 @@ export const agentTurn = task({
       let checkpointedCharacters = 0;
       let nextCheckpointAt = 0;
       let streamStarted = false;
-      // Approval is scoped to the exact calls that were shown, not to the run.
-      // A chained task discovers its later arguments only after the earlier
-      // step has produced them, so those calls were never on the card the user
-      // approved and must be presented before they can spend anything.
-      const approvedCalls = new Set<string>();
+      let approvalState: ApprovalState | null = null;
+      let planningStopped = false;
 
-      for (turns = 1; turns <= MAX_TURNS; turns += 1) {
+      const preflight = await safelyBuildCompletePlan({
+        provider,
+        conversation,
+        tools,
+        signal,
+        log,
+      });
+      routedModel = preflight.routedModel ?? routedModel;
+      usage = addUsage(usage, preflight.usage);
+
+      if (preflight.plan || payload.planMode) {
+        const approval = await approveCompletePlan({
+          payload,
+          provider,
+          conversation,
+          tools,
+          initialPlan: preflight.plan ?? noBillablePlan(),
+          signal,
+          log,
+        });
+
+        routedModel = approval.routedModel ?? routedModel;
+        usage = addUsage(usage, approval.usage);
+
+        if (approval.terminalMessage) {
+          text = approval.terminalMessage;
+          blocks.push({ type: "text", text });
+          planningStopped = true;
+        } else {
+          approvalState = approval.state;
+        }
+      }
+
+      for (turns = 1; !planningStopped && turns <= MAX_TURNS; turns += 1) {
         if (await cancellationRequested(payload.runId)) {
           cancellationObserved = true;
           break;
@@ -273,37 +308,79 @@ export const agentTurn = task({
         // has not already seen. Turns that only read local guidance cost
         // nothing and are never interrupted, which is how the reference product
         // behaves: the card appears for billable work and for nothing else.
-        if (
-          needsPlanApproval(toolCalls, approvedCalls) ||
-          (payload.planMode && turns === 1)
-        ) {
-          const decision = await requestPlanApproval(payload, toolCalls, log);
+        const currentPlan = approvalState?.plan;
+        const coveredByPlan =
+          currentPlan !== undefined && planCoversCalls(currentPlan, toolCalls);
 
-          if (decision.approved) {
-            for (const call of toolCalls) {
-              approvedCalls.add(callFingerprint(call));
-            }
+        if (!coveredByPlan && needsPlanApproval(toolCalls, new Set())) {
+          const planned = await safelyBuildCompletePlan({
+            provider,
+            conversation,
+            tools,
+            initialCalls: toolCalls,
+            signal,
+            log,
+          });
+          routedModel = planned.routedModel ?? routedModel;
+          usage = addUsage(usage, planned.usage);
+          const fallbackPlan =
+            planned.plan ?? (await buildPlanFromCalls(toolCalls));
+
+          if (!fallbackPlan) {
+            throw new Error("billable_plan_unavailable");
           }
 
-          if (!decision.approved) {
+          const approval = await approveCompletePlan({
+            payload,
+            provider,
+            conversation,
+            tools,
+            initialCalls: toolCalls,
+            initialPlan: fallbackPlan,
+            signal,
+            log,
+          });
+          routedModel = approval.routedModel ?? routedModel;
+          usage = addUsage(usage, approval.usage);
+
+          if (approval.terminalMessage) {
+            for (const call of toolCalls) {
+              executionsOf(conversation, call.id, approval.terminalMessage);
+            }
+            blocks.push({ type: "text", text: approval.terminalMessage });
+            text += `\n\n${approval.terminalMessage}`;
+            break;
+          }
+
+          approvalState = approval.state;
+
+          if (!approvalState) {
+            const decisionMessage = "The plan was not approved.";
             // Nothing was dispatched, so nothing needs unwinding. The model is
             // told what the person said and gets another pass at the plan.
             for (const call of toolCalls) {
-              executionsOf(conversation, call.id, decision.message);
+              executionsOf(conversation, call.id, decisionMessage);
             }
 
-            blocks.push({ type: "text", text: decision.message });
-            text += `\n\n${decision.message}`;
-
-            if (decision.terminal) break;
-
+            blocks.push({ type: "text", text: decisionMessage });
+            text += `\n\n${decisionMessage}`;
             continue;
           }
         }
 
         metadata.set("status", "running_tools");
-
-        const executions = await runToolCalls(payload, toolCalls);
+        const approvedExecution = await runApprovedToolCalls({
+          payload,
+          toolCalls,
+          approvalState,
+          provider,
+          conversation,
+          tools,
+          signal,
+          log,
+        });
+        approvalState = approvedExecution.approvalState;
+        const executions = approvedExecution.executions;
 
         // Results are appended in the order the model asked for them, not the
         // order they finished, so a replayed conversation is byte-identical.
@@ -325,6 +402,15 @@ export const agentTurn = task({
                   },
             ),
           });
+        }
+
+        if (approvedExecution.terminalMessage) {
+          blocks.push({
+            type: "text",
+            text: approvedExecution.terminalMessage,
+          });
+          text += `\n\n${approvedExecution.terminalMessage}`;
+          break;
         }
 
         if (signal?.aborted || (await cancellationRequested(payload.runId))) {
@@ -605,23 +691,26 @@ function executionsOf(
   });
 }
 
-/**
- * Pauses the run and shows its plan.
- *
- * The plan is derived from the tool calls the model actually asked for rather
- * than from a second "now write a plan" model round-trip: what the user
- * approves is then exactly what will run, and the per-step estimates are the
- * provider's real prices for those arguments.
- *
- * The wait itself is a Trigger token, so the run is checkpointed while a person
- * thinks. It costs nothing and survives a deploy.
- */
-async function requestPlanApproval(
+type ApprovalState = {
+  plan: PlanPayload;
+  mode: "RUN_ALL" | "STEP_BY_STEP";
+  waitpointId: string;
+  /** STEP_BY_STEP approval releases exactly one pending billable node. */
+  stepReleased: boolean;
+};
+
+type PlanDecisionResult = {
+  waitpointId: string;
+  decision: PlanDecision | null;
+  terminalMessage: string | null;
+};
+
+/** Pauses on one persisted Trigger token and returns the exact decision. */
+async function requestPlanDecision(
   payload: AgentTurnPayload,
-  toolCalls: ToolCall[],
+  plan: PlanPayload,
   log: (message: string, extra?: Record<string, unknown>) => void,
-): Promise<{ approved: boolean; terminal: boolean; message: string }> {
-  const plan = await buildPlan(toolCalls);
+): Promise<PlanDecisionResult> {
   const { waitpointId, tokenId } = await createPlanWaitpoint({
     runId: payload.runId,
     plan,
@@ -659,18 +748,18 @@ async function requestPlanApproval(
 
     if (resumed.count === 0) {
       return {
-        approved: false,
-        terminal: true,
-        message: "This run was cancelled.",
+        waitpointId,
+        decision: null,
+        terminalMessage: "This run was cancelled.",
       };
     }
 
     metadata.set("status", "running");
 
     return {
-      approved: false,
-      terminal: true,
-      message:
+      waitpointId,
+      decision: null,
+      terminalMessage:
         "This plan expired before it was approved. Send the request again to start over.",
     };
   }
@@ -684,95 +773,286 @@ async function requestPlanApproval(
 
   if (resumed.count === 0) {
     return {
-      approved: false,
-      terminal: true,
-      message: "This run was cancelled.",
+      waitpointId,
+      decision: null,
+      terminalMessage: "This run was cancelled.",
     };
   }
 
   metadata.set("status", "running");
 
-  if (result.output.resolution === "RUN_ALL") {
-    return { approved: true, terminal: false, message: "" };
-  }
+  return { waitpointId, decision: result.output, terminalMessage: null };
+}
 
+/** Rebuilds until user approves or wait expires/cancels. */
+async function approveCompletePlan(options: {
+  payload: AgentTurnPayload;
+  provider: OpenRouterProvider;
+  conversation: AgentMessage[];
+  tools: ReturnType<typeof agentToolSchemas>;
+  initialCalls?: ToolCall[];
+  initialPlan: PlanPayload;
+  signal?: AbortSignal;
+  log: (message: string, extra?: Record<string, unknown>) => void;
+}): Promise<{
+  state: ApprovalState | null;
+  terminalMessage: string | null;
+  routedModel: string | null;
+  usage: { inputTokens: number; outputTokens: number } | null;
+}> {
+  let plan = options.initialPlan;
+  let routedModel: string | null = null;
+  let usage: { inputTokens: number; outputTokens: number } | null = null;
+
+  while (true) {
+    const outcome = await requestPlanDecision(
+      options.payload,
+      plan,
+      options.log,
+    );
+
+    if (outcome.terminalMessage) {
+      return {
+        state: null,
+        terminalMessage: outcome.terminalMessage,
+        routedModel,
+        usage,
+      };
+    }
+
+    const decision = outcome.decision!;
+    if (
+      decision.resolution === "RUN_ALL" ||
+      decision.resolution === "STEP_BY_STEP"
+    ) {
+      return {
+        state: {
+          plan,
+          mode: decision.resolution,
+          waitpointId: outcome.waitpointId,
+          stepReleased: decision.resolution === "STEP_BY_STEP",
+        },
+        terminalMessage: null,
+        routedModel,
+        usage,
+      };
+    }
+
+    const revised = await safelyBuildCompletePlan({
+      provider: options.provider,
+      conversation: [
+        ...options.conversation,
+        {
+          role: "user",
+          content: `Revise this proposed plan:\n${JSON.stringify(plan)}`,
+        },
+      ],
+      tools: options.tools,
+      initialCalls: options.initialCalls,
+      feedback: decision.feedback,
+      signal: options.signal,
+      log: options.log,
+    });
+    routedModel = revised.routedModel ?? routedModel;
+    usage = addUsage(usage, revised.usage);
+    plan = revised.plan ?? plan;
+  }
+}
+
+async function safelyBuildCompletePlan(
+  options: Parameters<typeof buildCompleteExecutionPlan>[0] & {
+    log: (message: string, extra?: Record<string, unknown>) => void;
+  },
+) {
+  const { log, ...plannerOptions } = options;
+
+  try {
+    return await buildCompleteExecutionPlan(plannerOptions);
+  } catch (error) {
+    log("complete plan generation failed", {
+      reason: error instanceof Error ? error.message : String(error),
+    });
+    return { plan: null, routedModel: null, usage: null };
+  }
+}
+
+function noBillablePlan(): PlanPayload {
   return {
-    approved: false,
-    terminal: false,
-    message: result.output.feedback
-      ? `The plan was not approved. Requested changes: ${result.output.feedback}`
-      : "The plan was not approved.",
+    title: "Plan response",
+    overview:
+      "Plan mode is on. Review this zero-credit response step before continuing.",
+    steps: [
+      {
+        id: "step_1",
+        n: 1,
+        toolName: "respond_without_tools",
+        title: "Prepare response",
+        description: "Answer using available context without a billable tool.",
+        dependsOn: [],
+        input: {},
+        estimateCredits: 0,
+        status: "PENDING",
+      },
+    ],
+    totalEstimate: 0,
+    notes: "Automatic billable safety approval remains active on every send.",
   };
 }
 
-/**
- * Prices the requested calls and describes them as numbered steps.
- *
- * Local tools are left out: they read guidance, cost nothing, and listing them
- * as steps would pad the plan with work the user has no reason to weigh.
- */
-async function buildPlan(toolCalls: ToolCall[]): Promise<PlanPayload> {
-  const billable = toolCalls
-    .map((call) => ({ call, definition: getTool(call.name) }))
-    .filter(
-      (
-        entry,
-      ): entry is {
-        call: ToolCall;
-        definition: NonNullable<typeof entry.definition>;
-      } => entry.definition !== undefined,
-    );
+async function runApprovedToolCalls(options: {
+  payload: AgentTurnPayload;
+  toolCalls: ToolCall[];
+  approvalState: ApprovalState | null;
+  provider: OpenRouterProvider;
+  conversation: AgentMessage[];
+  tools: ReturnType<typeof agentToolSchemas>;
+  signal?: AbortSignal;
+  log: (message: string, extra?: Record<string, unknown>) => void;
+}): Promise<{
+  executions: Map<string, TurnToolResult>;
+  approvalState: ApprovalState | null;
+  terminalMessage: string | null;
+}> {
+  let state = options.approvalState;
+  const billableCalls = options.toolCalls.filter((call) => getTool(call.name));
 
-  let estimates: number[] = [];
-
-  try {
-    const priced = await estimateCredits(
-      billable.map((entry) => ({
-        type: entry.definition.nodeType,
-        data: entry.definition.toNodeInput(
-          entry.definition.input.parse(entry.call.input),
-        ),
-      })),
-    );
-
-    estimates = priced.map((entry) => entry.microcredits);
-  } catch {
-    // An unpriced plan is still worth approving; the steps are the point.
-    estimates = billable.map(() => 0);
+  if (
+    billableCalls.length > 0 &&
+    (!state || !planCoversCalls(state.plan, billableCalls))
+  ) {
+    throw new Error("billable_call_not_in_approved_plan");
   }
 
-  const steps = billable.map((entry, index) => ({
-    n: index + 1,
-    title: entry.definition.name.replace(/_/g, " "),
-    description: entry.definition.description.split(".")[0] + ".",
-    estimateCredits: estimates[index] ?? 0,
-  }));
+  if (!state || state.mode === "RUN_ALL") {
+    if (state) {
+      for (const call of options.toolCalls) {
+        if (!getTool(call.name)) continue;
+        state = {
+          ...state,
+          plan: markPlanStep(state.plan, call, "RUNNING"),
+        };
+      }
+      await updatePlanWaitpointPayload(state.waitpointId, state.plan);
+    }
+    const executions = await runToolCalls(options.payload, options.toolCalls);
+    if (state) {
+      for (const call of options.toolCalls) {
+        const execution = executions.get(call.id);
+        if (!getTool(call.name) || !execution) continue;
+        state = {
+          ...state,
+          plan: markPlanStep(
+            state.plan,
+            call,
+            execution.state === "COMPLETED"
+              ? "COMPLETED"
+              : execution.state === "FAILED"
+                ? "FAILED"
+                : "SKIPPED",
+          ),
+        };
+      }
+      await updatePlanWaitpointPayload(state.waitpointId, state.plan);
+    }
+    return { executions, approvalState: state, terminalMessage: null };
+  }
 
-  const totalEstimate = steps.reduce(
-    (sum, step) => sum + step.estimateCredits,
-    0,
-  );
+  const executions = new Map<string, TurnToolResult>();
+  for (const call of options.toolCalls) {
+    if (getTool(call.name) && !state.stepReleased) {
+      const outcome = await requestPlanDecision(
+        options.payload,
+        state.plan,
+        options.log,
+      );
+      if (outcome.terminalMessage) {
+        executions.set(call.id, {
+          state: "CANCELLED",
+          result: null,
+          userMessage: outcome.terminalMessage,
+        });
+        return {
+          executions,
+          approvalState: state,
+          terminalMessage: outcome.terminalMessage,
+        };
+      }
 
-  return {
-    title:
-      steps.length === 1 ? "One step to run" : `${steps.length} steps to run`,
-    overview:
-      "Approve to run these steps. Nothing has been charged yet — the estimate " +
-      `is ${formatEstimate(totalEstimate)}.`,
-    steps:
-      steps.length > 0
-        ? steps
-        : [
-            {
-              n: 1,
-              title: "no billable steps",
-              description: "This turn only reads guidance and costs nothing.",
-              estimateCredits: 0,
-            },
-          ],
-    totalEstimate,
-    notes: null,
-  };
+      const decision = outcome.decision!;
+      if (decision.resolution === "REQUEST_CHANGES") {
+        const revised = await safelyBuildCompletePlan({
+          provider: options.provider,
+          conversation: options.conversation,
+          tools: options.tools,
+          initialCalls: [call],
+          feedback: decision.feedback,
+          signal: options.signal,
+          log: options.log,
+        });
+        const approval = await approveCompletePlan({
+          ...options,
+          initialCalls: [call],
+          initialPlan: revised.plan ?? state.plan,
+        });
+        if (approval.terminalMessage || !approval.state) {
+          const message =
+            approval.terminalMessage ?? "The plan was not approved.";
+          executions.set(call.id, {
+            state: "CANCELLED",
+            result: null,
+            userMessage: message,
+          });
+          return {
+            executions,
+            approvalState: approval.state,
+            terminalMessage: message,
+          };
+        }
+        state = approval.state;
+      } else {
+        state = {
+          ...state,
+          mode: decision.resolution,
+          waitpointId: outcome.waitpointId,
+          stepReleased: decision.resolution === "STEP_BY_STEP",
+        };
+      }
+    }
+
+    if (getTool(call.name)) {
+      if (!planCoversCalls(state.plan, [call])) {
+        throw new Error("billable_call_not_in_approved_plan");
+      }
+      state = {
+        ...state,
+        plan: markPlanStep(state.plan, call, "RUNNING"),
+      };
+      await updatePlanWaitpointPayload(state.waitpointId, state.plan);
+    }
+
+    const execution = await runToolCalls(options.payload, [call]);
+    const result = execution.get(call.id);
+    if (result) executions.set(call.id, result);
+
+    if (getTool(call.name) && result) {
+      state = {
+        ...state,
+        plan: markPlanStep(
+          state.plan,
+          call,
+          result.state === "COMPLETED"
+            ? "COMPLETED"
+            : result.state === "FAILED"
+              ? "FAILED"
+              : "SKIPPED",
+        ),
+        stepReleased: state.mode === "RUN_ALL",
+      };
+      await updatePlanWaitpointPayload(state.waitpointId, state.plan);
+    }
+  }
+
+  return { executions, approvalState: state, terminalMessage: null };
 }
 
 function addUsage(
