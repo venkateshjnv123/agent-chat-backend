@@ -3,6 +3,7 @@ import { AgentRunStateSchema } from "@/contracts/chat";
 import { prisma } from "@/db/client";
 import { withAuth } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
+import { ensureRunDispatched } from "@/services/dispatchRun";
 
 /**
  * REST reconciliation for a run.
@@ -27,6 +28,13 @@ export async function GET(
     });
 
     if (!run) return errorResponse("NOT_FOUND", { trace });
+
+    if (run.status === "QUEUED" && !run.triggerRunId) {
+      // REST polling is the durable recovery path when initial dispatch died
+      // after acceptance. Delivery is idempotent and failure does not hide the
+      // authoritative queued state from the client.
+      await ensureRunDispatched(run.id).catch(() => null);
+    }
 
     return jsonResponse(
       AgentRunStateSchema.parse({

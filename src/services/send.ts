@@ -1,6 +1,4 @@
-import { dispatchAgentTurn } from "@/agent/dispatch";
 import { SendMessageResponseSchema } from "@/contracts/chat";
-import { prisma } from "@/db/client";
 import type { RequestContext } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
 import {
@@ -8,6 +6,7 @@ import {
   bindAttachments,
   resolveReadyAttachments,
 } from "@/services/attachments";
+import { ensureRunDispatched } from "@/services/dispatchRun";
 import {
   ActiveRunExistsError,
   ChatNotFoundError,
@@ -66,6 +65,7 @@ export async function handleSend(
       content: withAttachmentUrls(input.content, attachments),
       idempotencyKey: input.idempotencyKey,
       traceId: trace,
+      planMode: input.planMode ?? false,
     });
   } catch (error) {
     if (error instanceof ChatNotFoundError) {
@@ -81,32 +81,7 @@ export async function handleSend(
     throw error;
   }
 
-  // A replayed send must not enqueue a second execution. The stored token is
-  // still valid for the original run, so the client can resubscribe with it.
-  if (accepted.replayed) {
-    const run = await prisma.agentRun.findUnique({
-      where: { id: accepted.runId },
-      select: { triggerRunId: true },
-    });
-
-    const { mintRealtimeToken } = await import("@/agent/dispatch");
-    const minted = run?.triggerRunId
-      ? await mintRealtimeToken(run.triggerRunId)
-      : null;
-
-    return jsonResponse(
-      SendMessageResponseSchema.parse({
-        chatId: accepted.chatId,
-        messageId: accepted.assistantMessageId,
-        runId: accepted.runId,
-        realtimeRunId: run?.triggerRunId ?? null,
-        realtimeToken: minted?.realtimeToken ?? "",
-      }),
-      { status: 202, trace },
-    );
-  }
-
-  if (attachments.length > 0) {
+  if (!accepted.replayed && attachments.length > 0) {
     await bindAttachments({
       chatId: accepted.chatId,
       messageId: accepted.userMessageId,
@@ -114,28 +89,33 @@ export async function handleSend(
     });
   }
 
-  const dispatch = await dispatchAgentTurn({
-    chatId: accepted.chatId,
-    runId: accepted.runId,
-    assistantMessageId: accepted.assistantMessageId,
-    userAccountId,
-    traceId: trace,
-    sessionId,
-    planMode: input.planMode ?? false,
-  });
+  // Delivery can fail after the DB transaction (bad environment, network
+  // outage, process death). The accepted response remains truthful: the run is
+  // queued durably, and send replay / token mint / REST reconciliation all
+  // retry this same idempotent outbox row.
+  const dispatch = await ensureRunDispatched(accepted.runId, sessionId).catch(
+    (error: unknown) => {
+      console.error(
+        JSON.stringify({
+          level: "error",
+          traceId: trace,
+          runId: accepted.runId,
+          message: "Trigger dispatch deferred",
+          reason: error instanceof Error ? error.name : "UnknownError",
+        }),
+      );
 
-  await prisma.agentRun.update({
-    where: { id: accepted.runId },
-    data: { triggerRunId: dispatch.triggerRunId },
-  });
+      return null;
+    },
+  );
 
   return jsonResponse(
     SendMessageResponseSchema.parse({
       chatId: accepted.chatId,
       messageId: accepted.assistantMessageId,
       runId: accepted.runId,
-      realtimeRunId: dispatch.triggerRunId,
-      realtimeToken: dispatch.realtimeToken,
+      realtimeRunId: dispatch?.triggerRunId ?? null,
+      realtimeToken: dispatch?.realtimeToken ?? "",
     }),
     { status: 202, trace },
   );

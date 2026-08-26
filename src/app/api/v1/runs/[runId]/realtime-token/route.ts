@@ -1,7 +1,7 @@
-import { mintRealtimeToken } from "@/agent/dispatch";
 import { RealtimeTokenResponseSchema } from "@/contracts/chat";
 import { withAuth } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
+import { ensureRunDispatched } from "@/services/dispatchRun";
 import { findOwnedRun } from "@/services/runs";
 
 /**
@@ -21,7 +21,9 @@ export async function POST(
 
     if (!run) return errorResponse("NOT_FOUND", { trace });
 
-    if (!run.triggerRunId) {
+    const dispatch = await ensureRunDispatched(run.id).catch(() => null);
+
+    if (!dispatch) {
       // Dispatch has not completed yet, so there is nothing to subscribe to.
       // The client falls back to REST reconciliation and retries.
       return errorResponse("CONFLICT", {
@@ -30,16 +32,12 @@ export async function POST(
       });
     }
 
-    const { realtimeToken, expiresAt } = await mintRealtimeToken(
-      run.triggerRunId,
-    );
-
     return jsonResponse(
       RealtimeTokenResponseSchema.parse({
         runId: run.id,
-        realtimeRunId: run.triggerRunId,
-        realtimeToken,
-        expiresAt: expiresAt.toISOString(),
+        realtimeRunId: dispatch.triggerRunId,
+        realtimeToken: dispatch.realtimeToken,
+        expiresAt: dispatch.expiresAt.toISOString(),
       }),
       { trace },
     );

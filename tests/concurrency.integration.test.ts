@@ -104,6 +104,39 @@ describeIntegration("send path concurrency", { timeout: 30_000 }, () => {
     await prisma.chat.delete({ where: { id: chat.id } });
   });
 
+  it("scopes an idempotency key to its authenticated owner", async () => {
+    const first = await freshChat();
+    const other = await prisma.userAccount.upsert({
+      where: { clerkUserId: `${CLERK_ID}_other` },
+      update: {},
+      create: {
+        clerkUserId: `${CLERK_ID}_other`,
+        creditAccount: { create: {} },
+      },
+    });
+    const sharedKey = `shared-${crypto.randomUUID()}`;
+
+    const ownerRun = await acceptMessage({
+      userAccountId: first.userAccountId,
+      content: "owner",
+      idempotencyKey: sharedKey,
+      traceId: "trace-owner",
+    });
+    const otherRun = await acceptMessage({
+      userAccountId: other.id,
+      content: "other",
+      idempotencyKey: sharedKey,
+      traceId: "trace-other",
+    });
+
+    expect(otherRun.runId).not.toBe(ownerRun.runId);
+    expect(otherRun.chatId).not.toBe(ownerRun.chatId);
+
+    await prisma.userAccount.delete({ where: { id: other.id } });
+    await prisma.chat.delete({ where: { id: ownerRun.chatId } });
+    await prisma.chat.delete({ where: { id: first.chat.id } });
+  });
+
   it("allows a new run once the previous one is terminal", async () => {
     const { chat, userAccountId } = await freshChat();
 

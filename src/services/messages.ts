@@ -42,34 +42,32 @@ export async function acceptMessage(input: {
   content: string;
   idempotencyKey: string;
   traceId: string;
+  planMode?: boolean;
 }): Promise<SendResult> {
   // A retried send must not open a second run. Checking first keeps the happy
   // path cheap; the unique constraint below is what actually guarantees it.
-  const existing = await prisma.agentRun.findUnique({
-    where: { idempotencyKey: input.idempotencyKey },
-    include: {
-      messages: { orderBy: { sequence: "asc" } },
-    },
-  });
+  const existing = await findAcceptedMessage(
+    input.userAccountId,
+    input.idempotencyKey,
+  );
 
-  if (existing) {
-    const user = existing.messages.find((message) => message.role === "USER");
-    const assistant = existing.messages.find(
-      (message) => message.role === "ASSISTANT",
-    );
-
-    return {
-      chatId: existing.chatId,
-      userMessageId: user?.id ?? "",
-      assistantMessageId: assistant?.id ?? "",
-      runId: existing.id,
-      replayed: true,
-    };
-  }
+  if (existing) return existing;
 
   try {
     return await openRun(input);
   } catch (error) {
+    if (error instanceof ActiveRunExistsError) {
+      // Two first requests with the same key can both miss the optimistic read
+      // and race on the unique constraint. The loser replays the winner rather
+      // than reporting a false active-run conflict.
+      const raced = await findAcceptedMessage(
+        input.userAccountId,
+        input.idempotencyKey,
+      );
+
+      if (raced) return raced;
+    }
+
     // The chat may be locked by a run whose worker died. Releasing an expired
     // lease and trying once more is the difference between a chat that
     // recovers and one that returns 409 forever. Only once: a second failure
@@ -84,12 +82,38 @@ export async function acceptMessage(input: {
   }
 }
 
+async function findAcceptedMessage(
+  ownerId: string,
+  idempotencyKey: string,
+): Promise<SendResult | null> {
+  const existing = await prisma.agentRun.findUnique({
+    where: { ownerId_idempotencyKey: { ownerId, idempotencyKey } },
+    include: { messages: { orderBy: { sequence: "asc" } } },
+  });
+
+  if (!existing) return null;
+
+  const user = existing.messages.find((message) => message.role === "USER");
+  const assistant = existing.messages.find(
+    (message) => message.role === "ASSISTANT",
+  );
+
+  return {
+    chatId: existing.chatId,
+    userMessageId: user?.id ?? "",
+    assistantMessageId: assistant?.id ?? "",
+    runId: existing.id,
+    replayed: true,
+  };
+}
+
 async function openRun(input: {
   chatId?: string;
   userAccountId: string;
   content: string;
   idempotencyKey: string;
   traceId: string;
+  planMode?: boolean;
 }): Promise<SendResult> {
   try {
     return await prisma.$transaction(async (tx) => {
@@ -106,8 +130,10 @@ async function openRun(input: {
       const run = await tx.agentRun.create({
         data: {
           chatId,
+          ownerId: input.userAccountId,
           status: "QUEUED",
           idempotencyKey: input.idempotencyKey,
+          planMode: input.planMode ?? false,
           traceId: input.traceId,
         },
       });

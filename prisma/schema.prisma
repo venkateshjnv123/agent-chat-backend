@@ -97,6 +97,7 @@ model UserAccount {
   updatedAt   DateTime @updatedAt
 
   chats         Chat[]
+  runs          AgentRun[]
   creditAccount CreditAccount?
   attachments   Attachment[]
 }
@@ -159,9 +160,12 @@ model Message {
 model AgentRun {
   id             String    @id @default(cuid())
   chatId         String
+  ownerId        String
   status         RunStatus @default(QUEUED)
   triggerRunId   String?   @unique
-  idempotencyKey String    @unique
+  idempotencyKey String
+  /// Persisted because dispatch recovery rebuilds its payload from Postgres.
+  planMode       Boolean   @default(false)
   routedModel    String?
   turns          Int       @default(0)
   errorCode      String?
@@ -184,6 +188,7 @@ model AgentRun {
   updatedAt      DateTime  @updatedAt
 
   chat            Chat                @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  owner           UserAccount         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
   messages        Message[]
   toolInvocations ToolInvocation[]
   skills          RunSkill[]
@@ -191,6 +196,8 @@ model AgentRun {
   ledgerEntries   CreditLedgerEntry[]
 
   @@index([chatId, createdAt])
+  @@unique([ownerId, idempotencyKey])
+  @@index([status, triggerRunId, createdAt])
   // Partial unique index (one active run per chat) is added by raw SQL in the
   // migration — Prisma cannot express a WHERE clause on an index.
 }
