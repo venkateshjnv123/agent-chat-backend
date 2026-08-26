@@ -24,7 +24,7 @@
     "tools:check": "node scripts/generate-tool-schemas.mjs --check",
     "trigger:login": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 login",
     "trigger:dev": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 dev",
-    "trigger:deploy": "NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 deploy"
+    "trigger:deploy": "prisma generate && NODE_OPTIONS=--use-system-ca pnpm dlx trigger.dev@4.5.12 deploy"
   },
   "dependencies": {
     "@clerk/backend": "^3.16.10",

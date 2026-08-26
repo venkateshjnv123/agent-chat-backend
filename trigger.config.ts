@@ -8,7 +8,11 @@ export default defineConfig({
   // additional-files extension preserves the repository-relative path.
   legacyDevProcessCwdBehaviour: false,
   build: {
-    extensions: [additionalFiles({ files: ["./agent-skills/**"] })],
+    extensions: [
+      additionalFiles({
+        files: ["./agent-skills/**", "./src/generated/prisma/**"],
+      }),
+    ],
   },
   maxDuration: 300,
   machine: "small-1x",
