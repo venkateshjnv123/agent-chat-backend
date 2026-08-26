@@ -9,7 +9,7 @@ Durable API and agent-orchestration service for Galaxy Agent Chat. It accepts au
 - Streams assistant text, activity, tool calls, and approval waitpoints through Trigger.dev Realtime.
 - Reconciles every run from PostgreSQL after reloads, reconnects, token expiry, or terminal events.
 - Supports cancellation, failed-run retry, plan approval, and step-by-step plan execution.
-- Signs direct browser uploads through Transloadit and verifies completed assemblies before use.
+- Signs direct image, video, and audio uploads through Transloadit, verifies completed assemblies before use, and preserves attachment order for media tools such as video merging.
 - Reserves, settles, and refunds tool credits through an auditable ledger.
 - Loads application-owned skills on demand and records their content version against each run.
 

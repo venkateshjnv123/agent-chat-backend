@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const resolveReadyAttachments = vi.fn(async () => []);
+const resolveReadyAttachments = vi.fn<
+  () => Promise<{ id: string; url: string }[]>
+>(async () => []);
 vi.mock("@/services/attachments", () => ({
   AttachmentError: class AttachmentError extends Error {},
   resolveReadyAttachments,
@@ -24,7 +26,11 @@ vi.mock("@/services/runLimits", () => ({
   UserRunLimitError: class UserRunLimitError extends Error {},
 }));
 
-const ensureRunDispatched = vi.fn();
+const ensureRunDispatched = vi.fn(async () => ({
+  triggerRunId: "trigger_default",
+  realtimeToken: "token_default",
+  expiresAt: new Date(),
+}));
 vi.mock("@/services/dispatchRun", () => ({ ensureRunDispatched }));
 
 const { handleSend } = await import("@/services/send");
@@ -83,5 +89,29 @@ describe("send dispatch recovery", () => {
       realtimeToken: "token_1",
     });
     expect(ensureRunDispatched).toHaveBeenCalledWith("run_1", "session_1");
+  });
+
+  it("passes attached video URLs to the agent in the selected order", async () => {
+    resolveReadyAttachments.mockResolvedValueOnce([
+      { id: "video_1", url: "https://assets.test/first.mp4" },
+      { id: "video_2", url: "https://assets.test/second.webm" },
+    ]);
+
+    await handleSend(context, {
+      content: "Merge these videos",
+      idempotencyKey: "idempotency-videos",
+      attachmentIds: ["video_1", "video_2"],
+    });
+
+    expect(acceptMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content:
+          "Merge these videos\n\nAttached media (in order):\n" +
+          "1. https://assets.test/first.mp4\n" +
+          "2. https://assets.test/second.webm",
+        titleSource: "Merge these videos",
+        attachmentIds: ["video_1", "video_2"],
+      }),
+    );
   });
 });

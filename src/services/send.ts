@@ -60,9 +60,9 @@ export async function handleSend(
     accepted = await acceptMessage({
       chatId: input.chatId,
       userAccountId,
-      // The model reads plain text, so the attachment URLs are appended to the
-      // message it sees. Without this an attached image is a row in our
-      // database that the agent has no way to know about.
+      // The model reads plain text, so ordered media URLs are appended to the
+      // message it sees. Without this an attachment is a row in our database
+      // that the agent has no way to know about.
       content: withAttachmentUrls(input.content, attachments),
       idempotencyKey: input.idempotencyKey,
       traceId: trace,
@@ -135,10 +135,10 @@ export async function handleSend(
 }
 
 /**
- * Appends attached image URLs to the text the model receives.
+ * Appends attached media URLs to the text the model receives.
  *
- * They are numbered because order carries meaning — "crop the second one" has
- * to resolve to the same image the user reordered in the composer.
+ * They are numbered because order carries meaning — "merge these videos" must
+ * use the same sequence the user selected in the composer.
  */
 function withAttachmentUrls(
   content: string,
@@ -150,5 +150,5 @@ function withAttachmentUrls(
     .map((attachment, index) => `${index + 1}. ${attachment.url}`)
     .join("\n");
 
-  return `${content}\n\nAttached images:\n${list}`;
+  return `${content}\n\nAttached media (in order):\n${list}`;
 }
