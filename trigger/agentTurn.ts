@@ -46,10 +46,13 @@ import {
 } from "@/tools/execute";
 import type { PlanPayload } from "@/contracts/waitpoint";
 import {
+  approvedPlanExecutionInstruction,
   buildCompleteExecutionPlan,
   buildPlanFromCalls,
+  hasPendingBillablePlanSteps,
   markPlanStep,
   planCoversCalls,
+  shouldRetryApprovedPlanCall,
 } from "@/services/executionPlan";
 import {
   getLocalTool,
@@ -93,6 +96,15 @@ export type AgentTurnPayload = {
  * complete, persisted turn rather than a timeout.
  */
 const MAX_TURNS = 8;
+const MAX_APPROVED_PLAN_NUDGES = 2;
+
+class ApprovedPlanExecutionError extends Error {
+  constructor() {
+    super("approved_plan_not_executed");
+    this.name = "ApprovedPlanExecutionError";
+  }
+}
+
 export const agentTurn = task({
   id: "agent-turn",
   // A media workflow can run several slow children in sequence (image, video,
@@ -195,6 +207,7 @@ export const agentTurn = task({
       let activitySequence = 0;
       let thinkingDurationMs = 0;
       let approvalState: ApprovalState | null = null;
+      let approvedPlanNudges = 0;
       let planningStopped = false;
 
       activityStream.push({
@@ -237,6 +250,12 @@ export const agentTurn = task({
           planningStopped = true;
         } else {
           approvalState = approval.state;
+          if (approvalState) {
+            conversation.push({
+              role: "system",
+              content: approvedPlanExecutionInstruction(approvalState.plan),
+            });
+          }
         }
       }
 
@@ -380,7 +399,34 @@ export const agentTurn = task({
         }
         if (turnText) blocks.push({ type: "text", text: turnText });
 
-        if (signal?.aborted || cancellationObserved || toolCalls.length === 0) {
+        if (signal?.aborted || cancellationObserved) {
+          break;
+        }
+
+        if (toolCalls.length === 0) {
+          if (
+            approvalState &&
+            hasPendingBillablePlanSteps(approvalState.plan)
+          ) {
+            approvedPlanNudges += 1;
+            if (approvedPlanNudges > MAX_APPROVED_PLAN_NUDGES) {
+              throw new ApprovedPlanExecutionError();
+            }
+
+            if (turnText) {
+              conversation.push({ role: "assistant", content: turnText });
+            }
+            conversation.push({
+              role: "system",
+              content: approvedPlanExecutionInstruction(approvalState.plan),
+            });
+            log("approved plan returned without tool calls", {
+              turn: turns,
+              nudge: approvedPlanNudges,
+            });
+            continue;
+          }
+
           break;
         }
 
@@ -411,6 +457,33 @@ export const agentTurn = task({
         const currentPlan = approvalState?.plan;
         const coveredByPlan =
           currentPlan !== undefined && planCoversCalls(currentPlan, toolCalls);
+
+        if (
+          currentPlan &&
+          shouldRetryApprovedPlanCall(currentPlan, toolCalls)
+        ) {
+          approvedPlanNudges += 1;
+          if (approvedPlanNudges > MAX_APPROVED_PLAN_NUDGES) {
+            throw new ApprovedPlanExecutionError();
+          }
+
+          const mismatchMessage =
+            "This billable call differs from the approved plan and was not run. " +
+            "Retry using the exact approved tool and input.";
+          for (const call of toolCalls) {
+            executionsOf(conversation, call.id, mismatchMessage);
+          }
+          conversation.push({
+            role: "system",
+            content: approvedPlanExecutionInstruction(currentPlan),
+          });
+          log("unapproved variation rejected without a second approval", {
+            turn: turns,
+            nudge: approvedPlanNudges,
+            tools: toolCalls.map((call) => call.name),
+          });
+          continue;
+        }
 
         if (!coveredByPlan && needsPlanApproval(toolCalls, new Set())) {
           const planned = await safelyBuildCompletePlan({
@@ -504,6 +577,9 @@ export const agentTurn = task({
         });
         approvalState = approvedExecution.approvalState;
         const executions = approvedExecution.executions;
+        if (toolCalls.some((call) => getTool(call.name) !== undefined)) {
+          approvedPlanNudges = 0;
+        }
 
         // Results are appended in the order the model asked for them, not the
         // order they finished, so a replayed conversation is byte-identical.
@@ -574,10 +650,25 @@ export const agentTurn = task({
           break;
         }
 
+        if (approvalState && hasPendingBillablePlanSteps(approvalState.plan)) {
+          conversation.push({
+            role: "system",
+            content: approvedPlanExecutionInstruction(approvalState.plan),
+          });
+        }
+
         if (turns === MAX_TURNS) exhausted = true;
       }
 
       const cancelled = (signal?.aborted ?? false) || cancellationObserved;
+
+      if (
+        !cancelled &&
+        approvalState &&
+        hasPendingBillablePlanSteps(approvalState.plan)
+      ) {
+        throw new ApprovedPlanExecutionError();
+      }
 
       // The ceiling is reported in the transcript, not just in a log. A turn
       // that silently stops mid-plan reads to the user as the model giving up.
@@ -1463,29 +1554,35 @@ async function restoreConversation(
 async function failRun(payload: AgentTurnPayload, error: unknown) {
   const isEmptyStream = error instanceof EmptyStreamError;
   const isTimeout = error instanceof Error && error.name === "TimeoutError";
-  const errorCode = isEmptyStream
-    ? "empty_stream"
-    : error instanceof Error
-      ? error.message.slice(0, 120)
-      : "unknown_error";
+  const isApprovedPlanIncomplete = error instanceof ApprovedPlanExecutionError;
+  const errorCode = isApprovedPlanIncomplete
+    ? error.message
+    : isEmptyStream
+      ? "empty_stream"
+      : error instanceof Error
+        ? error.message.slice(0, 120)
+        : "unknown_error";
 
   // Retryability comes from the provider layer's own classification rather than
   // from matching on message text here. Offering a retry that is certain to
   // fail the same way is worse than offering none, and the layer that made the
   // request is the one that knows which it was.
   const retryable =
+    isApprovedPlanIncomplete ||
     isEmptyStream ||
     isTimeout ||
     (error instanceof TransientProviderError &&
       !(error instanceof PermanentProviderError));
 
-  const userMessage = isEmptyStream
-    ? "The model returned an empty response. Try sending the message again."
-    : isTimeout
-      ? "This turn took longer than expected. You can retry it safely."
-      : retryable
-        ? "The model provider was unavailable. You can retry this turn."
-        : "This turn failed before it finished.";
+  const userMessage = isApprovedPlanIncomplete
+    ? "The approved plan did not execute. Retry this turn safely."
+    : isEmptyStream
+      ? "The model returned an empty response. Try sending the message again."
+      : isTimeout
+        ? "This turn took longer than expected. You can retry it safely."
+        : retryable
+          ? "The model provider was unavailable. You can retry this turn."
+          : "This turn failed before it finished.";
 
   logger.error("turn failed", {
     chatId: payload.chatId,

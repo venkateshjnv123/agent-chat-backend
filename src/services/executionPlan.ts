@@ -155,7 +155,7 @@ export async function buildPlanFromCalls(
     const definition = getTool(call.name);
     if (!definition) return [];
 
-    const input = asRecord(call.input);
+    const input = canonicalToolInput(definition, asRecord(call.input));
     return [
       {
         id: `step_${index + 1}`,
@@ -201,7 +201,7 @@ export function markPlanStep(
   const eligible = status === "RUNNING" ? ["PENDING"] : ["RUNNING", "PENDING"];
   const definition = getTool(call.name);
   if (!definition) return plan;
-  const input = sanitizeInput(definition, asRecord(call.input));
+  const input = canonicalToolInput(definition, asRecord(call.input));
   const index = plan.steps.findIndex(
     (step) =>
       eligible.includes(step.status) &&
@@ -229,6 +229,46 @@ export function hasPendingPlannedTool(
   );
 }
 
+/** Whether an approved plan still contains provider work that must run. */
+export function hasPendingBillablePlanSteps(plan: PlanPayload): boolean {
+  return plan.steps.some(
+    (step) => step.status === "PENDING" && getTool(step.toolName) !== undefined,
+  );
+}
+
+/**
+ * A call that differs from a still-pending approved plan is not a new approval.
+ * It is an execution mistake: tell the model to retry the approved call rather
+ * than asking the person to approve the same task twice.
+ */
+export function shouldRetryApprovedPlanCall(
+  plan: PlanPayload,
+  calls: readonly ToolCall[],
+): boolean {
+  return (
+    hasPendingBillablePlanSteps(plan) &&
+    calls.some((call) => getTool(call.name) !== undefined) &&
+    !planCoversCalls(plan, calls)
+  );
+}
+
+/** Internal instruction used after approval and on a rejected mismatched call. */
+export function approvedPlanExecutionInstruction(plan: PlanPayload): string {
+  const pending = plan.steps.filter(
+    (step) =>
+      step.status === "PENDING" &&
+      getTool(step.toolName) !== undefined &&
+      dependenciesCompleted(plan, step),
+  );
+
+  return [
+    "The user approved the billable execution plan below. Execute it now.",
+    "Call each pending tool with the approved input; do not merely describe what you will do.",
+    "Do not invent result URLs. For $fromStep inputs, use the completed dependency tool result.",
+    JSON.stringify({ title: plan.title, steps: pending }),
+  ].join("\n");
+}
+
 /** Multiset coverage: one approved node can release at most one actual call. */
 export function planCoversCalls(
   plan: PlanPayload,
@@ -239,7 +279,7 @@ export function planCoversCalls(
   for (const call of calls) {
     const definition = getTool(call.name);
     if (!definition) continue;
-    const input = sanitizeInput(definition, asRecord(call.input));
+    const input = canonicalToolInput(definition, asRecord(call.input));
     const step = plan.steps.find(
       (candidate) =>
         !used.has(candidate.id) &&
@@ -367,7 +407,7 @@ function normalizeDraft(
   });
   const draftEntries = valid.map((step) => {
     const definition = getTool(step.toolName)!;
-    const input = sanitizeInput(definition, asRecord(step.input));
+    const input = canonicalPlanInput(definition, asRecord(step.input));
 
     return {
       sourceId: step.id,
@@ -392,7 +432,7 @@ function normalizeDraft(
   for (const call of initialCalls) {
     const definition = getTool(call.name);
     if (!definition) continue;
-    const input = sanitizeInput(definition, asRecord(call.input));
+    const input = canonicalToolInput(definition, asRecord(call.input));
     const present = draftEntries.some(
       (step) => step.toolName === call.name && sameJson(step.input, input),
     );
@@ -551,6 +591,60 @@ function substituteReferences(value: unknown): unknown {
       substituteReferences(item),
     ]),
   );
+}
+
+function canonicalToolInput(
+  definition: NonNullable<ReturnType<typeof getTool>>,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const parsed = definition.input.safeParse(input);
+  return sanitizeInput(
+    definition,
+    asRecord(parsed.success ? parsed.data : input),
+  );
+}
+
+function canonicalPlanInput(
+  definition: NonNullable<ReturnType<typeof getTool>>,
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const parsed = definition.input.safeParse(substituteReferences(input));
+  if (!parsed.success) return sanitizeInput(definition, input);
+
+  const canonical = sanitizeInput(definition, asRecord(parsed.data));
+  return restorePlanReferences(canonical, input) as Record<string, unknown>;
+}
+
+function restorePlanReferences(canonical: unknown, approved: unknown): unknown {
+  if (
+    approved &&
+    typeof approved === "object" &&
+    !Array.isArray(approved) &&
+    typeof (approved as Record<string, unknown>).$fromStep === "string"
+  ) {
+    return approved;
+  }
+
+  if (Array.isArray(canonical)) {
+    const source = Array.isArray(approved) ? approved : [];
+    return canonical.map((value, index) =>
+      restorePlanReferences(value, source[index]),
+    );
+  }
+
+  if (canonical && typeof canonical === "object") {
+    const source =
+      approved && typeof approved === "object" && !Array.isArray(approved)
+        ? (approved as Record<string, unknown>)
+        : {};
+    return Object.fromEntries(
+      Object.entries(canonical as Record<string, unknown>).map(
+        ([key, value]) => [key, restorePlanReferences(value, source[key])],
+      ),
+    );
+  }
+
+  return canonical;
 }
 
 function parsePlannerJson(text: string): unknown {

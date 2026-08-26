@@ -7,11 +7,14 @@ const estimateCredits = vi.fn();
 vi.mock("@/magica/client", () => ({ estimateCredits }));
 
 const {
+  approvedPlanExecutionInstruction,
   buildCompleteExecutionPlan,
   buildPlanFromCalls,
+  hasPendingBillablePlanSteps,
   hasPendingPlannedTool,
   markPlanStep,
   planCoversCalls,
+  shouldRetryApprovedPlanCall,
 } = await import("@/services/executionPlan");
 const { PlanPayloadSchema, ResolveWaitpointRequestSchema } =
   await import("@/contracts/waitpoint");
@@ -230,6 +233,55 @@ describe("complete execution planning", () => {
         { ...call, id: "2" },
       ]),
     ).toBe(false);
+  });
+
+  it("canonicalizes defaults and retries variations without another approval", async () => {
+    const approvedCall = {
+      id: "approved_image",
+      name: "gpt_image_2_text",
+      input: { prompt: "Naruto standing in Gurugram" },
+    };
+    const plan = await buildPlanFromCalls([approvedCall]);
+
+    expect(plan?.steps[0]?.input).toMatchObject({
+      prompt: "Naruto standing in Gurugram",
+      size: "Auto",
+      quality: "High",
+      background: "Auto",
+      n: 1,
+      output_format: "PNG",
+      output_compression: 80,
+    });
+
+    const equivalentCall = {
+      ...approvedCall,
+      id: "model_image",
+      input: {
+        prompt: "Naruto standing in Gurugram",
+        size: "Auto",
+        quality: "High",
+        background: "Auto",
+        n: 1,
+        output_format: "PNG",
+        output_compression: 80,
+      },
+    };
+    expect(planCoversCalls(plan!, [equivalentCall])).toBe(true);
+    expect(shouldRetryApprovedPlanCall(plan!, [equivalentCall])).toBe(false);
+
+    const changedCall = {
+      ...equivalentCall,
+      input: { ...equivalentCall.input, prompt: "A different image" },
+    };
+    expect(shouldRetryApprovedPlanCall(plan!, [changedCall])).toBe(true);
+    expect(hasPendingBillablePlanSteps(plan!)).toBe(true);
+    expect(approvedPlanExecutionInstruction(plan!)).toContain(
+      "do not merely describe what you will do",
+    );
+
+    const completed = markPlanStep(plan!, equivalentCall, "COMPLETED");
+    expect(hasPendingBillablePlanSteps(completed)).toBe(false);
+    expect(shouldRetryApprovedPlanCall(completed, [changedCall])).toBe(false);
   });
 });
 
