@@ -13,6 +13,7 @@ import { prisma } from "@/db/client";
 import { estimateCredits } from "@/magica/client";
 import { recordModelUsage } from "@/services/creditLedger";
 import { formatEstimate } from "@/services/credits";
+import { callFingerprint, needsPlanApproval } from "@/services/planGate";
 import {
   createPlanWaitpoint,
   expirePlanWaitpoint,
@@ -115,9 +116,11 @@ export const agentTurn = task({
       // the model was finished. The distinction is the whole point of 3.5: a
       // capped turn keeps its partial output and says why it stopped.
       let exhausted = false;
-      // Approval covers the run, not each batch: a user who approved a plan
-      // should not be asked again for the follow-up step it described.
-      let planApproved = !payload.planMode;
+      // Approval is scoped to the exact calls that were shown, not to the run.
+      // A chained task discovers its later arguments only after the earlier
+      // step has produced them, so those calls were never on the card the user
+      // approved and must be presented before they can spend anything.
+      const approvedCalls = new Set<string>();
 
       for (turns = 1; turns <= MAX_TURNS; turns += 1) {
         let turnText = "";
@@ -168,10 +171,21 @@ export const agentTurn = task({
           tools: toolCalls.map((call) => call.name),
         });
 
-        if (!planApproved) {
+        // A batch needs approval when it would spend credits on calls the user
+        // has not already seen. Turns that only read local guidance cost
+        // nothing and are never interrupted, which is how the reference product
+        // behaves: the card appears for billable work and for nothing else.
+        if (
+          needsPlanApproval(toolCalls, approvedCalls) ||
+          (payload.planMode && turns === 1)
+        ) {
           const decision = await requestPlanApproval(payload, toolCalls, log);
 
-          planApproved = decision.approved;
+          if (decision.approved) {
+            for (const call of toolCalls) {
+              approvedCalls.add(callFingerprint(call));
+            }
+          }
 
           if (!decision.approved) {
             // Nothing was dispatched, so nothing needs unwinding. The model is
