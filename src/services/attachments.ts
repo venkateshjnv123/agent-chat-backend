@@ -42,7 +42,12 @@ export async function createSignedUpload(input: {
 }): Promise<{ attachmentId: string; signed: SignedUpload }> {
   const attachment = await prisma.$transaction(async (tx) => {
     // Serialises quota decisions for this owner across serverless instances.
-    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${input.ownerId}, 1))`;
+    await tx.$queryRaw`
+      WITH owner_lock AS (
+        SELECT pg_advisory_xact_lock(hashtextextended(${input.ownerId}, 1))
+      )
+      SELECT 1::int AS locked FROM owner_lock
+    `;
 
     // Claiming the chat here means an attachment can never be prepared against
     // somebody else's conversation, even though the bytes bypass this server.

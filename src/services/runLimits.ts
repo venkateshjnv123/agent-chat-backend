@@ -29,7 +29,12 @@ export async function enforceUserRunLimits(
   ownerId: string,
   now = new Date(),
 ): Promise<void> {
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${ownerId}, 0))`;
+  await tx.$queryRaw`
+    WITH owner_lock AS (
+      SELECT pg_advisory_xact_lock(hashtextextended(${ownerId}, 0))
+    )
+    SELECT 1::int AS locked FROM owner_lock
+  `;
 
   const active = await tx.agentRun.count({
     where: {
