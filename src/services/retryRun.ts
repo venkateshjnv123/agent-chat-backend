@@ -1,5 +1,5 @@
-import { dispatchAgentTurn } from "@/agent/dispatch";
 import { prisma } from "@/db/client";
+import { ensureRunDispatched } from "@/services/dispatchRun";
 import { isTerminal } from "@/services/runs";
 
 /**
@@ -79,6 +79,7 @@ export async function retryRun(options: {
   if (!run.retryable || !assistantMessageId) return refuse("not_retryable");
 
   const nextAttempt = run.attempt + 1;
+  const traceId = crypto.randomUUID();
 
   // The conditional update is the idempotency: two simultaneous clicks both
   // read a terminal run, and exactly one of them writes the new attempt. No
@@ -96,6 +97,8 @@ export async function retryRun(options: {
       // The previous trigger run is finished; a stale id would let the client
       // subscribe to a run that will never emit again.
       triggerRunId: null,
+      dispatchingAt: null,
+      traceId,
     },
   });
 
@@ -109,22 +112,10 @@ export async function retryRun(options: {
     data: { status: "PENDING", content: "", contentBlocks: undefined },
   });
 
-  const traceId = crypto.randomUUID();
-
-  const dispatch = await dispatchAgentTurn({
-    chatId: run.chatId,
-    runId: run.id,
-    assistantMessageId,
-    userAccountId: options.userAccountId,
-    traceId,
-    sessionId: options.sessionId ?? null,
-    attempt: nextAttempt,
-  });
-
-  await prisma.agentRun.update({
-    where: { id: run.id },
-    data: { triggerRunId: dispatch.triggerRunId, traceId },
-  });
+  const dispatch = await ensureRunDispatched(
+    run.id,
+    options.sessionId ?? null,
+  ).catch(() => null);
 
   return {
     runId: run.id,
@@ -133,8 +124,8 @@ export async function retryRun(options: {
     status: "QUEUED",
     retried: true,
     attempt: nextAttempt,
-    realtimeRunId: dispatch.triggerRunId,
-    realtimeToken: dispatch.realtimeToken,
+    realtimeRunId: dispatch?.triggerRunId ?? null,
+    realtimeToken: dispatch?.realtimeToken ?? "",
     reason: null,
   };
 }

@@ -13,8 +13,10 @@ import { prisma } from "@/db/client";
 import { estimateCredits } from "@/magica/client";
 import { recordModelUsage } from "@/services/creditLedger";
 import { formatEstimate } from "@/services/credits";
+import { finalizeCancelledRun } from "@/services/cancelRun";
 import { callFingerprint, needsPlanApproval } from "@/services/planGate";
 import {
+  acknowledgePlanResolution,
   createPlanWaitpoint,
   expirePlanWaitpoint,
   type PlanDecision,
@@ -82,10 +84,33 @@ export const agentTurn = task({
         ...extra,
       });
 
-    await prisma.agentRun.update({
-      where: { id: payload.runId },
+    const claimed = await prisma.agentRun.updateMany({
+      where: {
+        id: payload.runId,
+        status: "QUEUED",
+        attempt: payload.attempt ?? 0,
+      },
       data: { status: "RUNNING", startedAt: new Date() },
     });
+
+    if (claimed.count === 0) {
+      const current = await prisma.agentRun.findUnique({
+        where: { id: payload.runId },
+        select: { status: true, attempt: true },
+      });
+
+      if (current?.status === "CANCELLING") {
+        await finalizeCancelledRun(payload.runId);
+        metadata.set("status", "cancelled");
+      }
+
+      log("turn start ignored", {
+        status: current?.status ?? "missing",
+        currentAttempt: current?.attempt ?? null,
+      });
+
+      return { runId: payload.runId, characters: 0 };
+    }
 
     metadata.set("status", "running");
 
@@ -123,6 +148,8 @@ export const agentTurn = task({
       // the model was finished. The distinction is the whole point of 3.5: a
       // capped turn keeps its partial output and says why it stopped.
       let exhausted = false;
+      let cancellationObserved = false;
+      let lastCancellationCheck = 0;
       // Approval is scoped to the exact calls that were shown, not to the run.
       // A chained task discovers its later arguments only after the earlier
       // step has produced them, so those calls were never on the card the user
@@ -130,6 +157,11 @@ export const agentTurn = task({
       const approvedCalls = new Set<string>();
 
       for (turns = 1; turns <= MAX_TURNS; turns += 1) {
+        if (await cancellationRequested(payload.runId)) {
+          cancellationObserved = true;
+          break;
+        }
+
         let turnText = "";
         let toolCalls: ToolCall[] = [];
 
@@ -141,6 +173,15 @@ export const agentTurn = task({
           // Cancellation is checked between chunks so a stopped run stops
           // promptly and still persists whatever it produced.
           if (signal?.aborted) break;
+
+          if (Date.now() - lastCancellationCheck >= 1_000) {
+            lastCancellationCheck = Date.now();
+
+            if (await cancellationRequested(payload.runId)) {
+              cancellationObserved = true;
+              break;
+            }
+          }
 
           if (chunk.type === "text") {
             turnText += chunk.text;
@@ -157,7 +198,9 @@ export const agentTurn = task({
 
         if (turnText) blocks.push({ type: "text", text: turnText });
 
-        if (signal?.aborted || toolCalls.length === 0) break;
+        if (signal?.aborted || cancellationObserved || toolCalls.length === 0) {
+          break;
+        }
 
         conversation.push({
           role: "assistant",
@@ -237,12 +280,15 @@ export const agentTurn = task({
           });
         }
 
-        if (signal?.aborted) break;
+        if (signal?.aborted || (await cancellationRequested(payload.runId))) {
+          cancellationObserved = true;
+          break;
+        }
 
         if (turns === MAX_TURNS) exhausted = true;
       }
 
-      const cancelled = signal?.aborted ?? false;
+      const cancelled = (signal?.aborted ?? false) || cancellationObserved;
 
       // The ceiling is reported in the transcript, not just in a log. A turn
       // that silently stops mid-plan reads to the user as the model giving up.
@@ -276,46 +322,29 @@ export const agentTurn = task({
       // about to become the complete one.
       textStream.close();
 
-      // Terminal state lands in one transaction: a client that reads after this
-      // commit sees a complete turn, never a half-written one.
-      await prisma.$transaction([
-        prisma.message.update({
-          where: { id: payload.assistantMessageId },
-          data: {
-            content: text,
-            contentBlocks: blocks.length > 0 ? (blocks as never) : undefined,
-            status: cancelled ? "CANCELLED" : "SUCCESS",
-            tokenUsage: usage ?? undefined,
-            aiModel: routedModel
-              ? { id: routedModel, name: routedModel, provider: "openrouter" }
-              : undefined,
-            metadata: {
-              turns,
-              maxTurnsReached: exhausted,
-              thinkingDurationSeconds: null,
-            },
-          },
-        }),
-        prisma.agentRun.update({
-          where: { id: payload.runId },
-          data: {
-            status: cancelled ? "CANCELLED" : "COMPLETED",
-            routedModel,
-            turns,
-            // A capped run completed — it produced real output — but it is
-            // retryable, and the code is what lets the UI say so.
-            errorCode: exhausted ? "max_turns_reached" : null,
-            userMessage: exhausted
-              ? `This turn hit the ${MAX_TURNS}-step limit before finishing.`
-              : null,
-            retryable: exhausted,
-            completedAt: new Date(),
-          },
-        }),
-      ]);
+      const finalStatus = await persistTurnTerminal(payload, {
+        text,
+        blocks,
+        usage,
+        routedModel,
+        turns,
+        exhausted,
+        cancelled,
+      });
 
-      metadata.set("status", cancelled ? "cancelled" : "completed");
-      log("turn finished", { cancelled, characters: text.length, turns });
+      metadata.set(
+        "status",
+        finalStatus === "CANCELLED"
+          ? "cancelled"
+          : finalStatus === "COMPLETED"
+            ? "completed"
+            : "failed",
+      );
+      log("turn finished", {
+        cancelled: finalStatus === "CANCELLED",
+        characters: text.length,
+        turns,
+      });
 
       return { runId: payload.runId, characters: text.length };
     } catch (error) {
@@ -528,17 +557,25 @@ async function requestPlanApproval(
   // releases this wait as a failure rather than hanging the run forever.
   const result = await wait.forToken<PlanDecision>(tokenId);
 
-  await prisma.agentRun.update({
-    where: { id: payload.runId },
-    data: { status: "RUNNING" },
-  });
-
-  metadata.set("status", "running");
-
   if (!result.ok) {
     // Expiry is terminal. Resuming an hour-old plan on nobody's authority is
     // worse than stopping and telling the user how to continue.
     await expirePlanWaitpoint(waitpointId);
+
+    const resumed = await prisma.agentRun.updateMany({
+      where: { id: payload.runId, status: "WAITING" },
+      data: { status: "RUNNING" },
+    });
+
+    if (resumed.count === 0) {
+      return {
+        approved: false,
+        terminal: true,
+        message: "This run was cancelled.",
+      };
+    }
+
+    metadata.set("status", "running");
 
     return {
       approved: false,
@@ -547,6 +584,23 @@ async function requestPlanApproval(
         "This plan expired before it was approved. Send the request again to start over.",
     };
   }
+
+  await acknowledgePlanResolution(waitpointId, result.output);
+
+  const resumed = await prisma.agentRun.updateMany({
+    where: { id: payload.runId, status: "WAITING" },
+    data: { status: "RUNNING" },
+  });
+
+  if (resumed.count === 0) {
+    return {
+      approved: false,
+      terminal: true,
+      message: "This run was cancelled.",
+    };
+  }
+
+  metadata.set("status", "running");
 
   if (result.output.resolution === "RUN_ALL") {
     return { approved: true, terminal: false, message: "" };
@@ -651,6 +705,106 @@ function asRecord(input: unknown): Record<string, unknown> {
     : {};
 }
 
+async function cancellationRequested(runId: string): Promise<boolean> {
+  const run = await prisma.agentRun.findUnique({
+    where: { id: runId },
+    select: { status: true },
+  });
+
+  return run?.status === "CANCELLING" || run?.status === "CANCELLED";
+}
+
+async function persistTurnTerminal(
+  payload: AgentTurnPayload,
+  outcome: {
+    text: string;
+    blocks: ContentBlock[];
+    usage: { inputTokens: number; outputTokens: number } | null;
+    routedModel: string | null;
+    turns: number;
+    exhausted: boolean;
+    cancelled: boolean;
+  },
+) {
+  return prisma.$transaction(async (tx) => {
+    const current = await tx.agentRun.findUnique({
+      where: { id: payload.runId },
+      select: { status: true, attempt: true },
+    });
+
+    if (!current) return "FAILED" as const;
+
+    // A stale/duplicate Trigger execution cannot resurrect a terminal row or a
+    // newer explicit retry attempt.
+    if (
+      current.attempt !== (payload.attempt ?? 0) ||
+      ["COMPLETED", "FAILED", "CANCELLED"].includes(current.status)
+    ) {
+      return current.status;
+    }
+
+    const cancelled = outcome.cancelled || current.status === "CANCELLING";
+    const status = cancelled ? ("CANCELLED" as const) : ("COMPLETED" as const);
+    const updated = await tx.agentRun.updateMany({
+      where: {
+        id: payload.runId,
+        attempt: payload.attempt ?? 0,
+        status: { in: ["RUNNING", "WAITING", "CANCELLING"] },
+      },
+      data: {
+        status,
+        routedModel: outcome.routedModel,
+        turns: outcome.turns,
+        errorCode: outcome.exhausted && !cancelled ? "max_turns_reached" : null,
+        userMessage: cancelled
+          ? "This run was cancelled."
+          : outcome.exhausted
+            ? `This turn hit the ${MAX_TURNS}-step limit before finishing.`
+            : null,
+        retryable: !cancelled && outcome.exhausted,
+        completedAt: new Date(),
+      },
+    });
+
+    if (updated.count === 0) {
+      const winner = await tx.agentRun.findUnique({
+        where: { id: payload.runId },
+        select: { status: true },
+      });
+
+      return winner?.status ?? ("FAILED" as const);
+    }
+
+    await tx.message.updateMany({
+      where: {
+        id: payload.assistantMessageId,
+        status: { in: ["PENDING", "STREAMING"] },
+      },
+      data: {
+        content: outcome.text,
+        contentBlocks:
+          outcome.blocks.length > 0 ? (outcome.blocks as never) : undefined,
+        status: cancelled ? "CANCELLED" : "SUCCESS",
+        tokenUsage: outcome.usage ?? undefined,
+        aiModel: outcome.routedModel
+          ? {
+              id: outcome.routedModel,
+              name: outcome.routedModel,
+              provider: "openrouter",
+            }
+          : undefined,
+        metadata: {
+          turns: outcome.turns,
+          maxTurnsReached: outcome.exhausted,
+          thinkingDurationSeconds: null,
+        },
+      },
+    });
+
+    return status;
+  });
+}
+
 /**
  * Rebuilds the prompt from persisted rows.
  *
@@ -717,13 +871,48 @@ async function failRun(payload: AgentTurnPayload, error: unknown) {
     errorCode,
   });
 
-  await prisma.$transaction([
-    prisma.message.update({
-      where: { id: payload.assistantMessageId },
-      data: { status: "FAILED" },
-    }),
-    prisma.agentRun.update({
+  const finalStatus = await prisma.$transaction(async (tx) => {
+    const current = await tx.agentRun.findUnique({
       where: { id: payload.runId },
+      select: { status: true, attempt: true },
+    });
+
+    if (!current) return "FAILED" as const;
+
+    if (current.status === "CANCELLING") {
+      await tx.agentRun.updateMany({
+        where: { id: payload.runId, status: "CANCELLING" },
+        data: {
+          status: "CANCELLED",
+          userMessage: "This run was cancelled.",
+          retryable: false,
+          completedAt: new Date(),
+        },
+      });
+      await tx.message.updateMany({
+        where: {
+          id: payload.assistantMessageId,
+          status: { in: ["PENDING", "STREAMING"] },
+        },
+        data: { status: "CANCELLED" },
+      });
+
+      return "CANCELLED" as const;
+    }
+
+    if (
+      current.attempt !== (payload.attempt ?? 0) ||
+      ["COMPLETED", "FAILED", "CANCELLED"].includes(current.status)
+    ) {
+      return current.status;
+    }
+
+    const updated = await tx.agentRun.updateMany({
+      where: {
+        id: payload.runId,
+        attempt: payload.attempt ?? 0,
+        status: { in: ["QUEUED", "RUNNING", "WAITING"] },
+      },
       data: {
         status: "FAILED",
         errorCode,
@@ -731,8 +920,27 @@ async function failRun(payload: AgentTurnPayload, error: unknown) {
         retryable,
         completedAt: new Date(),
       },
-    }),
-  ]);
+    });
 
-  metadata.set("status", "failed");
+    if (updated.count > 0) {
+      await tx.message.updateMany({
+        where: {
+          id: payload.assistantMessageId,
+          status: { in: ["PENDING", "STREAMING"] },
+        },
+        data: { status: "FAILED" },
+      });
+    }
+
+    return "FAILED" as const;
+  });
+
+  metadata.set(
+    "status",
+    finalStatus === "CANCELLED"
+      ? "cancelled"
+      : finalStatus === "COMPLETED"
+        ? "completed"
+        : "failed",
+  );
 }

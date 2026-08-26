@@ -44,6 +44,7 @@ export async function POST(
         userAccountId,
         resolution: parsed.data.resolution,
         feedback: parsed.data.feedback,
+        idempotencyKey: parsed.data.idempotencyKey,
       });
 
       return jsonResponse(ResolveWaitpointResponseSchema.parse(outcome), {
@@ -52,7 +53,11 @@ export async function POST(
     } catch (error) {
       if (error instanceof WaitpointError) {
         return errorResponse(
-          error.status === 400 ? "BAD_REQUEST" : "NOT_FOUND",
+          error.status === 400
+            ? "BAD_REQUEST"
+            : error.status === 409
+              ? "CONFLICT"
+              : "NOT_FOUND",
           {
             message: error.message,
             trace,

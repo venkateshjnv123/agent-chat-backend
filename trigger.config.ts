@@ -8,7 +8,9 @@ export default defineConfig({
   retries: {
     enabledInDev: false,
     default: {
-      maxAttempts: 2,
+      // AgentRun owns retry state. Platform retry would expose FAILED between
+      // attempts and release the one-run lock while another attempt is alive.
+      maxAttempts: 1,
       factor: 2,
       minTimeoutInMs: 1_000,
       maxTimeoutInMs: 10_000,

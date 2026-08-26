@@ -166,6 +166,8 @@ model AgentRun {
   idempotencyKey String
   /// Persisted because dispatch recovery rebuilds its payload from Postgres.
   planMode       Boolean   @default(false)
+  /// Lease around external Trigger dispatch; stale leases are reclaimable.
+  dispatchingAt  DateTime?
   routedModel    String?
   turns          Int       @default(0)
   errorCode      String?
@@ -249,6 +251,12 @@ model Waitpoint {
   token      String          @unique
   payload    Json
   resolution PlanResolution?
+  feedback   String?
+  /// Client key for the durable decision, persisted before Trigger delivery.
+  resolutionKey String?
+  deliveryClaimedAt DateTime?
+  deliveryAttempts  Int       @default(0)
+  deliveredAt       DateTime?
   resolvedAt DateTime?
   expiresAt  DateTime
   createdAt  DateTime        @default(now())

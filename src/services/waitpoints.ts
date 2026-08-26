@@ -20,6 +20,7 @@ import { prisma } from "@/db/client";
 
 /** A plan left unanswered has to end somewhere, or the run waits forever. */
 const EXPIRY_MS = 60 * 60 * 1000;
+const DELIVERY_LEASE_MS = 30_000;
 
 /**
  * `STEP_BY_STEP` is not implemented, so it is not offered.
@@ -106,6 +107,7 @@ export async function resolvePlanWaitpoint(options: {
   userAccountId: string;
   resolution: PlanResolution;
   feedback?: string;
+  idempotencyKey: string;
 }): Promise<ResolveOutcome> {
   const waitpoint = await prisma.waitpoint.findUnique({
     where: { id: options.waitpointId },
@@ -115,6 +117,9 @@ export async function resolvePlanWaitpoint(options: {
       status: true,
       token: true,
       resolution: true,
+      feedback: true,
+      resolutionKey: true,
+      deliveryClaimedAt: true,
       expiresAt: true,
       run: { select: { chat: { select: { userId: true } } } },
     },
@@ -171,23 +176,39 @@ export async function resolvePlanWaitpoint(options: {
     );
   }
 
-  // The conditional update is the race guard: two simultaneous clicks both
-  // reach here, and only the one that still sees PENDING gets a row back.
-  const claimed = await prisma.waitpoint.updateMany({
-    where: { id: waitpoint.id, status: "PENDING" },
-    data: {
-      status: "RESOLVED",
+  const feedback = options.feedback ?? null;
+
+  if (waitpoint.resolutionKey) {
+    assertSameDecision(waitpoint, {
       resolution: options.resolution,
-      resolvedAt: new Date(),
+      feedback,
+      idempotencyKey: options.idempotencyKey,
+    });
+  } else {
+    // Persist the decision first, but deliberately leave status PENDING. The UI
+    // must never report RESOLVED before Trigger accepted the token delivery.
+    await prisma.waitpoint.updateMany({
+      where: { id: waitpoint.id, status: "PENDING", resolutionKey: null },
+      data: {
+        resolution: options.resolution,
+        feedback,
+        resolutionKey: options.idempotencyKey,
+      },
+    });
+  }
+
+  const current = await prisma.waitpoint.findUniqueOrThrow({
+    where: { id: waitpoint.id },
+    select: {
+      status: true,
+      resolution: true,
+      feedback: true,
+      resolutionKey: true,
+      deliveryClaimedAt: true,
     },
   });
 
-  if (claimed.count === 0) {
-    const current = await prisma.waitpoint.findUniqueOrThrow({
-      where: { id: waitpoint.id },
-      select: { status: true, resolution: true },
-    });
-
+  if (current.status !== "PENDING") {
     return {
       waitpointId: waitpoint.id,
       runId: waitpoint.runId,
@@ -197,20 +218,147 @@ export async function resolvePlanWaitpoint(options: {
     };
   }
 
-  // Released only after the row committed, so the run can never resume on a
-  // decision the API would not report back.
-  await wait.completeToken<PlanDecision>(waitpoint.token, {
+  assertSameDecision(current, {
     resolution: options.resolution,
-    feedback: options.feedback ?? null,
+    feedback,
+    idempotencyKey: options.idempotencyKey,
+  });
+
+  const delivered = await deliverPlanDecision({
+    waitpointId: waitpoint.id,
+    runId: waitpoint.runId,
+    token: waitpoint.token,
+    resolution: options.resolution,
+    feedback,
+    idempotencyKey: options.idempotencyKey,
+  });
+
+  return delivered;
+}
+
+function assertSameDecision(
+  current: {
+    resolution: PlanResolution | null;
+    feedback: string | null;
+    resolutionKey: string | null;
+  },
+  expected: {
+    resolution: PlanResolution;
+    feedback: string | null;
+    idempotencyKey: string;
+  },
+) {
+  if (
+    current.resolution !== expected.resolution ||
+    current.feedback !== expected.feedback ||
+    current.resolutionKey !== expected.idempotencyKey
+  ) {
+    throw new WaitpointError(
+      "waitpoint_forbidden",
+      409,
+      "A different decision is already being submitted.",
+    );
+  }
+}
+
+async function deliverPlanDecision(options: {
+  waitpointId: string;
+  runId: string;
+  token: string;
+  resolution: PlanResolution;
+  feedback: string | null;
+  idempotencyKey: string;
+}): Promise<ResolveOutcome> {
+  const claimedAt = new Date();
+  const staleBefore = new Date(claimedAt.getTime() - DELIVERY_LEASE_MS);
+  const delivery = await prisma.waitpoint.updateMany({
+    where: {
+      id: options.waitpointId,
+      status: "PENDING",
+      resolutionKey: options.idempotencyKey,
+      OR: [
+        { deliveryClaimedAt: null },
+        { deliveryClaimedAt: { lt: staleBefore } },
+      ],
+    },
+    data: {
+      deliveryClaimedAt: claimedAt,
+      deliveryAttempts: { increment: 1 },
+    },
+  });
+
+  if (delivery.count === 0) {
+    return {
+      waitpointId: options.waitpointId,
+      runId: options.runId,
+      status: "PENDING",
+      resolution: options.resolution,
+      applied: false,
+    };
+  }
+
+  try {
+    await wait.completeToken<PlanDecision>(options.token, {
+      resolution: options.resolution,
+      feedback: options.feedback,
+    });
+  } catch (error) {
+    // Durable decision stays. Clearing only our lease lets the same client key
+    // redeliver after a transient Trigger failure.
+    await prisma.waitpoint.updateMany({
+      where: {
+        id: options.waitpointId,
+        status: "PENDING",
+        deliveryClaimedAt: claimedAt,
+      },
+      data: { deliveryClaimedAt: null },
+    });
+
+    throw error;
+  }
+
+  const finalized = await prisma.waitpoint.updateMany({
+    where: {
+      id: options.waitpointId,
+      status: "PENDING",
+      resolutionKey: options.idempotencyKey,
+    },
+    data: {
+      status: "RESOLVED",
+      resolvedAt: new Date(),
+      deliveredAt: new Date(),
+      deliveryClaimedAt: null,
+    },
   });
 
   return {
-    waitpointId: waitpoint.id,
-    runId: waitpoint.runId,
+    waitpointId: options.waitpointId,
+    runId: options.runId,
     status: "RESOLVED",
     resolution: options.resolution,
-    applied: true,
+    applied: finalized.count > 0,
   };
+}
+
+/** Worker-side acknowledgement repairs a crash after token delivery. */
+export async function acknowledgePlanResolution(
+  waitpointId: string,
+  decision: PlanDecision,
+): Promise<void> {
+  await prisma.waitpoint.updateMany({
+    where: {
+      id: waitpointId,
+      status: "PENDING",
+      resolution: decision.resolution,
+    },
+    data: {
+      feedback: decision.feedback,
+      status: "RESOLVED",
+      deliveredAt: new Date(),
+      resolvedAt: new Date(),
+      deliveryClaimedAt: null,
+    },
+  });
 }
 
 /** Marks a plan expired once its deadline passes without an answer. */

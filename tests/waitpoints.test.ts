@@ -15,6 +15,11 @@ type Row = {
   status: "PENDING" | "RESOLVED" | "EXPIRED" | "CANCELLED";
   token: string;
   resolution: string | null;
+  feedback: string | null;
+  resolutionKey: string | null;
+  deliveryClaimedAt: Date | null;
+  deliveryAttempts: number;
+  deliveredAt: Date | null;
   resolvedAt: Date | null;
   expiresAt: Date;
   ownerId: string;
@@ -51,12 +56,61 @@ const waitpoint = {
       where,
       data,
     }: {
-      where: { status?: string };
-      data: Partial<Row>;
+      where: {
+        status?: string;
+        resolution?: string;
+        resolutionKey?: string | null;
+        deliveryClaimedAt?: Date | null;
+        OR?: Array<{
+          deliveryClaimedAt?: null | { lt: Date };
+        }>;
+      };
+      data: Omit<Partial<Row>, "deliveryAttempts"> & {
+        deliveryAttempts?: number | { increment: number };
+      };
     }) => {
       if (where.status && row.status !== where.status) return { count: 0 };
+      if (
+        where.resolution !== undefined &&
+        row.resolution !== where.resolution
+      ) {
+        return { count: 0 };
+      }
+      if (
+        where.resolutionKey !== undefined &&
+        row.resolutionKey !== where.resolutionKey
+      ) {
+        return { count: 0 };
+      }
+      if (
+        where.deliveryClaimedAt !== undefined &&
+        row.deliveryClaimedAt?.getTime() !== where.deliveryClaimedAt?.getTime()
+      ) {
+        return { count: 0 };
+      }
+      if (where.OR) {
+        const matchesLease = where.OR.some((condition) => {
+          if (condition.deliveryClaimedAt === null) {
+            return row.deliveryClaimedAt === null;
+          }
 
-      Object.assign(row, data);
+          return condition.deliveryClaimedAt?.lt
+            ? !!row.deliveryClaimedAt &&
+                row.deliveryClaimedAt < condition.deliveryClaimedAt.lt
+            : false;
+        });
+
+        if (!matchesLease) return { count: 0 };
+      }
+
+      const { deliveryAttempts, ...rest } = data;
+      Object.assign(row, rest);
+
+      if (typeof deliveryAttempts === "number") {
+        row.deliveryAttempts = deliveryAttempts;
+      } else if (deliveryAttempts) {
+        row.deliveryAttempts += deliveryAttempts.increment;
+      }
 
       return { count: 1 };
     },
@@ -75,6 +129,11 @@ beforeEach(() => {
     status: "PENDING",
     token: "tok_1",
     resolution: null,
+    feedback: null,
+    resolutionKey: null,
+    deliveryClaimedAt: null,
+    deliveryAttempts: 0,
+    deliveredAt: null,
     resolvedAt: null,
     expiresAt: new Date(Date.now() + 60_000),
     ownerId: "user_a",
@@ -86,6 +145,7 @@ const APPROVE = {
   waitpointId: "wp_1",
   userAccountId: "user_a",
   resolution: "RUN_ALL" as const,
+  idempotencyKey: "decision-key-1",
 };
 
 describe("resolving a plan", () => {
@@ -148,6 +208,40 @@ describe("duplicate submission", () => {
 
     expect([first.applied, second.applied].filter(Boolean)).toHaveLength(1);
     expect(completeToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries token delivery with the persisted client key", async () => {
+    completeToken.mockRejectedValueOnce(new Error("transport down"));
+
+    await expect(resolvePlanWaitpoint(APPROVE)).rejects.toThrow(
+      "transport down",
+    );
+    expect(row).toMatchObject({
+      status: "PENDING",
+      resolution: "RUN_ALL",
+      resolutionKey: "decision-key-1",
+      deliveryClaimedAt: null,
+    });
+
+    expect(await resolvePlanWaitpoint(APPROVE)).toMatchObject({
+      status: "RESOLVED",
+      applied: true,
+    });
+    expect(completeToken).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a different decision while delivery is pending", async () => {
+    row.resolution = "RUN_ALL";
+    row.resolutionKey = "decision-key-1";
+
+    await expect(
+      resolvePlanWaitpoint({
+        ...APPROVE,
+        resolution: "REQUEST_CHANGES",
+        feedback: "make it blue",
+        idempotencyKey: "decision-key-2",
+      }),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });
 

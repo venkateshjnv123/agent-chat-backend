@@ -78,13 +78,13 @@ const message = {
 
 vi.mock("@/db/client", () => ({ prisma: { agentRun, message } }));
 
-const dispatchAgentTurn = vi.fn(async () => ({
+const ensureRunDispatched = vi.fn(async () => ({
   triggerRunId: "trigger_2",
   realtimeToken: "tok",
   expiresAt: new Date(),
 }));
 
-vi.mock("@/agent/dispatch", () => ({ dispatchAgentTurn }));
+vi.mock("@/services/dispatchRun", () => ({ ensureRunDispatched }));
 
 const { reclaimStaleRun } = await import("@/services/staleRuns");
 const { retryRun } = await import("@/services/retryRun");
@@ -176,13 +176,7 @@ describe("retry", () => {
     });
     // Same run id and same assistant message: the user's original message is
     // never written twice because it is never written at all.
-    expect(dispatchAgentTurn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        runId: "run_1",
-        assistantMessageId: "msg_assistant",
-        attempt: 1,
-      }),
-    );
+    expect(ensureRunDispatched).toHaveBeenCalledWith("run_1", null);
   });
 
   it("refuses a failure the worker did not mark retryable", async () => {
@@ -193,7 +187,7 @@ describe("retry", () => {
       retried: false,
       reason: "not_retryable",
     });
-    expect(dispatchAgentTurn).not.toHaveBeenCalled();
+    expect(ensureRunDispatched).not.toHaveBeenCalled();
   });
 
   it("refuses a run that is still going", async () => {
@@ -201,7 +195,7 @@ describe("retry", () => {
       retried: false,
       reason: "run_active",
     });
-    expect(dispatchAgentTurn).not.toHaveBeenCalled();
+    expect(ensureRunDispatched).not.toHaveBeenCalled();
   });
 
   it("lets only one of two simultaneous clicks dispatch", async () => {
@@ -215,7 +209,7 @@ describe("retry", () => {
 
     expect([first?.retried, second?.retried].filter(Boolean)).toHaveLength(1);
     // Paid work must not be dispatched twice by a double click.
-    expect(dispatchAgentTurn).toHaveBeenCalledTimes(1);
+    expect(ensureRunDispatched).toHaveBeenCalledTimes(1);
   });
 
   it("hides someone else's run behind the same answer as a missing one", async () => {
