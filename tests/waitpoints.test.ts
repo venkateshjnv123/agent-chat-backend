@@ -261,6 +261,23 @@ describe("duplicate submission", () => {
     expect(completeToken).toHaveBeenCalledTimes(2);
   });
 
+  it("recovers the same persisted decision after a browser reload", async () => {
+    row.resolution = "REQUEST_CHANGES";
+    row.feedback = "yes merge";
+    row.resolutionKey = "decision-key-before-reload";
+
+    const outcome = await resolvePlanWaitpoint({
+      ...APPROVE,
+      resolution: "REQUEST_CHANGES",
+      feedback: "yes merge",
+      idempotencyKey: "decision-key-after-reload",
+    });
+
+    expect(outcome).toMatchObject({ status: "RESOLVED", applied: true });
+    expect(row.resolutionKey).toBe("decision-key-before-reload");
+    expect(completeToken).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a different decision while delivery is pending", async () => {
     row.resolution = "RUN_ALL";
     row.resolutionKey = "decision-key-1";

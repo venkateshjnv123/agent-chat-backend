@@ -199,7 +199,6 @@ export async function resolvePlanWaitpoint(options: {
     assertSameDecision(waitpoint, {
       resolution: options.resolution,
       feedback,
-      idempotencyKey: options.idempotencyKey,
     });
   } else {
     // Persist the decision first, but deliberately leave status PENDING. The UI
@@ -238,8 +237,11 @@ export async function resolvePlanWaitpoint(options: {
   assertSameDecision(current, {
     resolution: options.resolution,
     feedback,
-    idempotencyKey: options.idempotencyKey,
   });
+
+  if (!current.resolutionKey) {
+    throw new Error("waitpoint_resolution_key_missing");
+  }
 
   const delivered = await deliverPlanDecision({
     waitpointId: waitpoint.id,
@@ -247,7 +249,10 @@ export async function resolvePlanWaitpoint(options: {
     token: waitpoint.token,
     resolution: options.resolution,
     feedback,
-    idempotencyKey: options.idempotencyKey,
+    // A reload creates a fresh browser key. Once a semantic decision has been
+    // persisted, retries must redeliver with that canonical key rather than
+    // wedging the waitpoint or accepting a contradictory resolution.
+    idempotencyKey: current.resolutionKey,
   });
 
   return delivered;
@@ -262,13 +267,11 @@ function assertSameDecision(
   expected: {
     resolution: PlanResolution;
     feedback: string | null;
-    idempotencyKey: string;
   },
 ) {
   if (
     current.resolution !== expected.resolution ||
-    current.feedback !== expected.feedback ||
-    current.resolutionKey !== expected.idempotencyKey
+    current.feedback !== expected.feedback
   ) {
     throw new WaitpointError(
       "waitpoint_forbidden",
