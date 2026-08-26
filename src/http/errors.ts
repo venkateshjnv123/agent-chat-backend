@@ -41,6 +41,7 @@ export function errorResponse(
     message?: string;
     issues?: ZodError["issues"];
     trace?: string;
+    headers?: Record<string, string>;
   } = {},
 ): Response {
   const trace = options.trace ?? traceId();
@@ -66,7 +67,7 @@ export function errorResponse(
 
   return Response.json(body, {
     status: STATUS_BY_CODE[code],
-    headers: baseHeaders(trace),
+    headers: { ...baseHeaders(trace), ...options.headers },
   });
 }
 

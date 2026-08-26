@@ -1,4 +1,7 @@
-import type { Attachment } from "@/contracts/attachments";
+import {
+  MONTHLY_ATTACHMENT_BYTES,
+  type Attachment,
+} from "@/contracts/attachments";
 import { prisma } from "@/db/client";
 import type { Attachment as AttachmentRow } from "@/generated/prisma/client";
 import {
@@ -37,28 +40,72 @@ export async function createSignedUpload(input: {
   mimeType: string;
   fileSize: number;
 }): Promise<{ attachmentId: string; signed: SignedUpload }> {
-  // Claiming the chat here means an attachment can never be prepared against
-  // somebody else's conversation, even though the upload itself goes straight
-  // to Transloadit and never passes through us.
-  if (input.chatId) {
-    const chat = await prisma.chat.findFirst({
-      where: { id: input.chatId, userId: input.ownerId },
-      select: { id: true },
+  const attachment = await prisma.$transaction(async (tx) => {
+    // Serialises quota decisions for this owner across serverless instances.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${input.ownerId}, 1))`;
+
+    // Claiming the chat here means an attachment can never be prepared against
+    // somebody else's conversation, even though the bytes bypass this server.
+    if (input.chatId) {
+      const chat = await tx.chat.findFirst({
+        where: {
+          id: input.chatId,
+          userId: input.ownerId,
+          deletedAt: null,
+        },
+        select: { id: true },
+      });
+
+      if (!chat) throw new AttachmentError("chat_not_found", "chat", 404);
+    }
+
+    const monthStartedAt = new Date();
+
+    monthStartedAt.setUTCDate(1);
+    monthStartedAt.setUTCHours(0, 0, 0, 0);
+
+    // A signature dies after 15 minutes. Releasing untouched PENDING rows a
+    // little later prevents abandoned browser tabs consuming quota forever.
+    await tx.attachment.updateMany({
+      where: {
+        ownerId: input.ownerId,
+        status: "PENDING",
+        createdAt: { lt: new Date(Date.now() - 20 * 60 * 1_000) },
+      },
+      data: {
+        status: "FAILED",
+        userMessage: "This upload expired before it started. Try again.",
+      },
     });
 
-    if (!chat) throw new AttachmentError("chat_not_found", "chat", 404);
-  }
+    const quota = await tx.$queryRaw<{ used: bigint }[]>`
+      SELECT COALESCE(SUM("fileSize"), 0)::bigint AS used
+      FROM "Attachment"
+      WHERE "ownerId" = ${input.ownerId}
+        AND "createdAt" >= ${monthStartedAt}
+        AND "status" <> 'FAILED'
+    `;
+    const used = Number(quota[0]?.used ?? 0n);
 
-  const attachment = await prisma.attachment.create({
-    data: {
-      ownerId: input.ownerId,
-      chatId: input.chatId ?? null,
-      filename: input.filename,
-      mimeType: input.mimeType,
-      fileSize: input.fileSize,
-      status: "PENDING",
-    },
-    select: { id: true },
+    if (used + input.fileSize > MONTHLY_ATTACHMENT_BYTES) {
+      throw new AttachmentError(
+        "monthly_upload_quota",
+        "Monthly upload quota reached.",
+        429,
+      );
+    }
+
+    return tx.attachment.create({
+      data: {
+        ownerId: input.ownerId,
+        chatId: input.chatId ?? null,
+        filename: input.filename,
+        mimeType: input.mimeType,
+        fileSize: input.fileSize,
+        status: "PENDING",
+      },
+      select: { id: true },
+    });
   });
 
   return {
@@ -90,8 +137,10 @@ export async function completeUpload(input: {
 
   if (!row) throw new AttachmentError("attachment_not_found", "gone", 404);
 
-  // Confirming twice is a duplicate click, not an error.
-  if (row.status === "READY" || row.status === "FAILED") return serialize(row);
+  // Confirming a completed upload twice is a duplicate click, not an error.
+  // FAILED is deliberately retried: a previous provider/network failure may be
+  // transient, and the durable row retains its safe copy while the retry runs.
+  if (row.status === "READY") return serialize(row);
 
   let assembly;
 
@@ -100,7 +149,7 @@ export async function completeUpload(input: {
   } catch (error) {
     if (error instanceof TransloaditError) {
       return serialize(
-        await markFailed(row.id, "That upload could not be verified."),
+        await markFailed(row.id, error.userMessage, input.assemblyId),
       );
     }
 
@@ -127,7 +176,7 @@ export async function completeUpload(input: {
     return serialize(
       await markFailed(
         row.id,
-        "That file was rejected. Attachments must be images under 10 MB.",
+        "That file was rejected. Use supported image, video, or audio media under 512 MiB.",
         assembly.assemblyId,
       ),
     );
@@ -141,6 +190,7 @@ export async function completeUpload(input: {
       // Trusted from Transloadit, not from the browser: these describe the file
       // that actually exists.
       resultUrl: assembly.url,
+      userMessage: null,
       mimeType: assembly.mimeType ?? row.mimeType,
       fileSize: assembly.fileSize ?? row.fileSize,
       width: assembly.width,
@@ -193,26 +243,6 @@ export async function resolveReadyAttachments(input: {
   }));
 }
 
-/** Records which message the attachments belong to, and in what order. */
-export async function bindAttachments(input: {
-  chatId: string;
-  messageId: string;
-  attachmentIds: string[];
-}): Promise<void> {
-  await Promise.all(
-    input.attachmentIds.map((id, index) =>
-      prisma.attachment.update({
-        where: { id },
-        data: {
-          chatId: input.chatId,
-          messageId: input.messageId,
-          order: index,
-        },
-      }),
-    ),
-  );
-}
-
 export async function listAttachments(
   ownerId: string,
   limit = 50,
@@ -226,13 +256,7 @@ export async function listAttachments(
   return rows.map(serialize);
 }
 
-/**
- * The failure reason is returned, not persisted.
- *
- * FAILED is the fact the row records; the wording belongs to whichever surface
- * renders it, and a column of user-facing copy would be one more thing to keep
- * consistent with no reader that needs it.
- */
+/** Persists the safe copy so reload and retry show the same explanation. */
 async function markFailed(
   id: string,
   userMessage: string,
@@ -242,6 +266,7 @@ async function markFailed(
     where: { id },
     data: {
       status: "FAILED",
+      userMessage,
       ...(assemblyId ? { assemblyId } : {}),
     },
   });
@@ -249,7 +274,7 @@ async function markFailed(
   return { ...row, userMessage };
 }
 
-function serialize(row: AttachmentRow & { userMessage?: string }): Attachment {
+function serialize(row: AttachmentRow): Attachment {
   return {
     id: row.id,
     status: row.status,

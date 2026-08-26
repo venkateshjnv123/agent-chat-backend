@@ -10,7 +10,7 @@ import { readRequiredEnv } from "@/env/server";
  * Transloadit Assembly signing and status.
  *
  * The secret never leaves this process. The browser receives a signature over
- * one specific set of parameters — bounded in time, restricted to images, and
+ * one specific set of parameters — bounded in time, restricted to media, and
  * capped in size — and can do nothing with it except the upload we authorised.
  * That is the point of signing on the server: an unsigned or client-signed
  * Assembly would let anyone run arbitrary robots on our account.
@@ -74,14 +74,13 @@ export function transloaditDate(date: Date): string {
  *
  * `/file/filter` is the security control, not the client's file picker. A
  * browser can send any bytes it likes to the upload URL; this step is what
- * stops a video or an executable becoming an attachment we then hand to a paid
- * tool. The size cap is enforced the same way, for the same reason.
+ * limits it to supported image, video, or audio media. The size cap is enforced
+ * the same way, for the same reason.
  *
  * There is deliberately no resize step. `/image/resize` has no downscale-only
  * strategy — `fit` upscales, verified against the live API by uploading a 1x1
  * pixel and getting 2048x2048 back — and inflating a small image costs bytes
- * and fidelity for nothing. The 10 MB cap already bounds the input, and Magica
- * prices by output size, not by what we send it.
+ * and fidelity for nothing. Magica prices by output size, not input size.
  */
 function steps() {
   return {

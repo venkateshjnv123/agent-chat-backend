@@ -1,11 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const resolveReadyAttachments = vi.fn(async () => []);
-const bindAttachments = vi.fn(async () => undefined);
 vi.mock("@/services/attachments", () => ({
   AttachmentError: class AttachmentError extends Error {},
   resolveReadyAttachments,
-  bindAttachments,
 }));
 
 const acceptMessage = vi.fn(async () => ({
@@ -17,8 +15,13 @@ const acceptMessage = vi.fn(async () => ({
 }));
 vi.mock("@/services/messages", () => ({
   ActiveRunExistsError: class ActiveRunExistsError extends Error {},
+  AttachmentBindingError: class AttachmentBindingError extends Error {},
   ChatNotFoundError: class ChatNotFoundError extends Error {},
   acceptMessage,
+}));
+
+vi.mock("@/services/runLimits", () => ({
+  UserRunLimitError: class UserRunLimitError extends Error {},
 }));
 
 const ensureRunDispatched = vi.fn();

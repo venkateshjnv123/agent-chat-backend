@@ -226,6 +226,7 @@ model ToolInvocation {
 
   run     AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   message Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  ledgerEntries CreditLedgerEntry[]
 
   @@index([runId, createdAt])
   @@index([externalRunId])
@@ -283,6 +284,8 @@ model Attachment {
   height     Int?
   filename   String?
   resultUrl  String?
+  /// Durable user-safe failure copy; internal provider detail is never stored.
+  userMessage String?
   order      Int              @default(0)
   createdAt  DateTime         @default(now())
 
@@ -311,6 +314,7 @@ model CreditLedgerEntry {
   id        String     @id @default(cuid())
   accountId String
   runId     String?
+  toolInvocationId String?
   delta     Int
   kind      LedgerKind
   opKey     String     @unique
@@ -320,6 +324,8 @@ model CreditLedgerEntry {
 
   account CreditAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
   run     AgentRun?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+  toolInvocation ToolInvocation? @relation(fields: [toolInvocationId], references: [id], onDelete: SetNull)
 
   @@index([accountId, createdAt])
+  @@index([toolInvocationId])
 }

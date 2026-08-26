@@ -13,6 +13,7 @@ type Entry = {
   id: string;
   accountId: string;
   runId: string | null;
+  toolInvocationId: string | null;
   delta: number;
   kind: "RESERVE" | "SETTLE" | "REFUND";
   opKey: string;
@@ -174,6 +175,9 @@ describe("settle", () => {
       "SETTLE",
       "REFUND",
     ]);
+    expect(entries.every((entry) => entry.toolInvocationId === "inv_1")).toBe(
+      true,
+    );
   });
 
   it("charges the shortfall when the provider cost more than estimated", async () => {

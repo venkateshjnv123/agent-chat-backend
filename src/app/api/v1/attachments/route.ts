@@ -12,11 +12,11 @@ import {
 } from "@/services/attachments";
 
 /**
- * Signs one image upload.
+ * Signs one media upload.
  *
  * The browser uploads straight to Transloadit — the bytes never pass through
  * this server — but the parameters it uploads under are ours, signed here, and
- * restricted to images under the size cap. Declared type and size are checked
+ * restricted to supported media under the size cap. Type and size are checked
  * before signing so an obviously invalid upload is refused without a round trip;
  * the signed `/file/filter` step is what enforces it on the actual bytes.
  */
@@ -52,8 +52,16 @@ export async function POST(request: Request) {
     } catch (error) {
       if (error instanceof AttachmentError) {
         return errorResponse(
-          error.status === 404 ? "NOT_FOUND" : "BAD_REQUEST",
+          error.status === 404
+            ? "NOT_FOUND"
+            : error.status === 429
+              ? "RATE_LIMITED"
+              : "BAD_REQUEST",
           {
+            message:
+              error.status === 429
+                ? "Monthly upload quota reached."
+                : undefined,
             trace,
           },
         );

@@ -1,5 +1,6 @@
 import { Prisma } from "@/generated/prisma/client";
 import { prisma } from "@/db/client";
+import { enforceUserRunLimits } from "@/services/runLimits";
 import { reclaimStaleRun } from "@/services/staleRuns";
 
 /** Postgres raises this when a unique constraint is violated. */
@@ -16,6 +17,13 @@ export class ChatNotFoundError extends Error {
   constructor() {
     super("Chat not found");
     this.name = "ChatNotFoundError";
+  }
+}
+
+export class AttachmentBindingError extends Error {
+  constructor() {
+    super("Attachment is no longer ready for this message");
+    this.name = "AttachmentBindingError";
   }
 }
 
@@ -43,6 +51,9 @@ export async function acceptMessage(input: {
   idempotencyKey: string;
   traceId: string;
   planMode?: boolean;
+  attachmentIds?: string[];
+  /** Original user copy, before attachment URLs are appended for the model. */
+  titleSource?: string;
 }): Promise<SendResult> {
   // A retried send must not open a second run. Checking first keeps the happy
   // path cheap; the unique constraint below is what actually guarantees it.
@@ -114,18 +125,34 @@ async function openRun(input: {
   idempotencyKey: string;
   traceId: string;
   planMode?: boolean;
+  attachmentIds?: string[];
+  titleSource?: string;
 }): Promise<SendResult> {
   try {
     return await prisma.$transaction(async (tx) => {
+      await enforceUserRunLimits(tx, input.userAccountId);
+
       // A first send creates the chat here rather than in a separate request:
       // one round trip, and no empty chat is left behind if the send fails.
       const chatId = input.chatId
         ? await requireOwnedChat(tx, input.userAccountId, input.chatId)
         : (
             await tx.chat.create({
-              data: { userId: input.userAccountId, title: null },
+              data: {
+                userId: input.userAccountId,
+                title: deriveChatTitle(input.titleSource ?? input.content),
+              },
             })
           ).id;
+
+      if (input.chatId) {
+        // A manually named chat wins. Only fill the initial null title, making
+        // replay and later sends state-idempotent.
+        await tx.chat.updateMany({
+          where: { id: chatId, title: null },
+          data: { title: deriveChatTitle(input.titleSource ?? input.content) },
+        });
+      }
 
       const run = await tx.agentRun.create({
         data: {
@@ -147,6 +174,13 @@ async function openRun(input: {
           sequence: await nextSequence(tx, chatId),
           runId: run.id,
         },
+      });
+
+      await bindAttachmentsInTransaction(tx, {
+        ownerId: input.userAccountId,
+        chatId,
+        messageId: userMessage.id,
+        attachmentIds: input.attachmentIds ?? [],
       });
 
       // The placeholder exists before the worker starts so a client that mounts
@@ -188,6 +222,44 @@ async function openRun(input: {
     }
 
     throw error;
+  }
+}
+
+/** Stable title for recent-chat navigation; no second model call or race. */
+export function deriveChatTitle(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  const characters = Array.from(normalized).slice(0, 80).join("");
+
+  return characters.length > 0 ? characters : "Untitled task";
+}
+
+/** Attachment ownership and message creation commit or roll back together. */
+async function bindAttachmentsInTransaction(
+  tx: Prisma.TransactionClient,
+  input: {
+    ownerId: string;
+    chatId: string;
+    messageId: string;
+    attachmentIds: string[];
+  },
+): Promise<void> {
+  for (const [order, id] of input.attachmentIds.entries()) {
+    const bound = await tx.attachment.updateMany({
+      where: {
+        id,
+        ownerId: input.ownerId,
+        status: "READY",
+        messageId: null,
+        OR: [{ chatId: null }, { chatId: input.chatId }],
+      },
+      data: {
+        chatId: input.chatId,
+        messageId: input.messageId,
+        order,
+      },
+    });
+
+    if (bound.count !== 1) throw new AttachmentBindingError();
   }
 }
 

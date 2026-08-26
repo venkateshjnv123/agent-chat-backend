@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * Image attachments, uploaded through Transloadit.
+ * Media attachments, uploaded through Transloadit.
  *
  * The browser never holds our Transloadit secret. It asks the backend to sign a
  * set of Assembly parameters, uploads directly to Transloadit with them, and
@@ -17,15 +17,28 @@ export const AttachmentStatusSchema = z.enum([
   "FAILED",
 ]);
 
-/** Images only. `merge_videos` takes ordered remote URLs, not uploads. */
 export const ACCEPTED_MIME_TYPES = [
   "image/png",
   "image/jpeg",
   "image/webp",
   "image/gif",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime",
+  "video/mpeg",
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/webm",
+  "audio/ogg",
+  "audio/aac",
+  "audio/flac",
 ] as const;
 
-export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+/** Reviewer policy: 0.5 GiB per file and 5 GiB signed per UTC month. */
+export const MAX_ATTACHMENT_BYTES = 512 * 1024 * 1024;
+export const MONTHLY_ATTACHMENT_BYTES = 5 * 1024 * 1024 * 1024;
 
 export const SignUploadRequestSchema = z.object({
   /** Optional: an attachment can be prepared before the chat exists. */

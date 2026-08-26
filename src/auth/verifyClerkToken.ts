@@ -1,6 +1,6 @@
 import { verifyToken } from "@clerk/backend";
 
-import { readRequiredEnv } from "@/env/server";
+import { readFrontendOrigins, readRequiredEnv } from "@/env/server";
 
 export type AuthedUser = {
   clerkUserId: string;
@@ -30,16 +30,16 @@ export async function verifyRequest(
   ]);
 
   try {
+    const authorizedParties = readFrontendOrigins();
     const payload = await verifyToken(token, {
       secretKey: CLERK_SECRET_KEY,
-      // Networkless verification against the instance that issued the token.
-      jwtKey: undefined,
-      audience: undefined,
+      // Clerk fetches and caches the instance JWKS from the secret-key-bound
+      // Backend API. This supports signing-key rotation; it is not networkless.
+      authorizedParties,
     });
 
     if (
-      typeof payload.iss === "string" &&
-      !payload.iss.includes(CLERK_JWT_ISSUER_DOMAIN.replace(/^https?:\/\//, ""))
+      normalizeIssuer(payload.iss) !== normalizeIssuer(CLERK_JWT_ISSUER_DOMAIN)
     ) {
       return null;
     }
@@ -48,6 +48,20 @@ export async function verifyRequest(
   } catch {
     // Never surface the verification error: it distinguishes "expired" from
     // "forged", which is information an unauthenticated caller should not have.
+    return null;
+  }
+}
+
+/** Exact normalized origin/path comparison; prefixes and suffixes are invalid. */
+function normalizeIssuer(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+
+  try {
+    const url = new URL(value);
+    const pathname = url.pathname.replace(/\/+$/, "");
+
+    return `${url.protocol}//${url.host}${pathname}`;
+  } catch {
     return null;
   }
 }

@@ -152,6 +152,7 @@ export async function reserveCredits(options: {
         data: {
           accountId: account.id,
           runId: options.runId,
+          toolInvocationId: options.toolName ? options.subject : null,
           delta: -amount,
           kind: "RESERVE",
           opKey,
@@ -247,6 +248,7 @@ export async function settleCredits(options: {
         data: {
           accountId: account.id,
           runId: options.runId,
+          toolInvocationId: options.toolName ? options.subject : null,
           delta: -collected,
           kind: "SETTLE",
           opKey: settleKey,
@@ -270,6 +272,7 @@ export async function settleCredits(options: {
           data: {
             accountId: account.id,
             runId: options.runId,
+            toolInvocationId: options.toolName ? options.subject : null,
             delta: -correction,
             kind: "REFUND",
             opKey: refundKey,
@@ -338,6 +341,7 @@ export async function refundReservation(options: {
         data: {
           accountId: account.id,
           runId: options.runId,
+          toolInvocationId: options.toolName ? options.subject : null,
           delta: amount,
           kind: "REFUND",
           opKey: refundKey,
@@ -384,6 +388,7 @@ export async function recordModelUsage(options: {
       data: {
         accountId,
         runId: options.runId,
+        toolInvocationId: null,
         delta: 0,
         kind: "SETTLE",
         opKey: opKeyFor(options, "SETTLE"),

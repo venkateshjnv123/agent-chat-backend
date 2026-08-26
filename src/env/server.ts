@@ -5,6 +5,18 @@ const optionalString = z.preprocess(
   emptyToUndefined,
   z.string().min(1).optional(),
 );
+const frontendOrigins = z
+  .string()
+  .min(1)
+  .refine(
+    (value) =>
+      value
+        .split(",")
+        .map((origin) => origin.trim())
+        .filter(Boolean)
+        .every((origin) => z.url().safeParse(origin).success),
+    "must be a comma-separated list of URLs",
+  );
 
 /**
  * Narrow read for the database connection.
@@ -57,7 +69,7 @@ export const ServerEnvSchema = z.object({
   // Optional until the dispatch slice (PLAN.md BE-0.9). Asserted at the point of
   // use so stubbed routes stay runnable before the Trigger.dev project exists.
   TRIGGER_SECRET_KEY: optionalString,
-  FRONTEND_ORIGIN: z.url(),
+  FRONTEND_ORIGIN: frontendOrigins,
   TRANSLOADIT_AUTH_KEY: optionalString,
   TRANSLOADIT_AUTH_SECRET: optionalString,
 });

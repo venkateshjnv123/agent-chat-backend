@@ -21,6 +21,9 @@ describe("corsHeaders", () => {
     expect(headers["access-control-allow-headers"]?.split(",")).toContain(
       "idempotency-key",
     );
+    expect(headers["access-control-allow-headers"]?.split(",")).toContain(
+      "x-session-id",
+    );
   });
 
   it("returns no CORS headers for an untrusted origin", () => {

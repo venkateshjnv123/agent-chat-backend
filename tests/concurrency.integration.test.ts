@@ -176,4 +176,34 @@ describeIntegration("send path concurrency", { timeout: 30_000 }, () => {
 
     await prisma.chat.delete({ where: { id: chat.id } });
   });
+
+  it("binds attachments in the same transaction as the accepted message", async () => {
+    const { chat, userAccountId } = await freshChat();
+    const attachment = await prisma.attachment.create({
+      data: {
+        ownerId: userAccountId,
+        chatId: chat.id,
+        status: "READY",
+        resultUrl: "https://cdn.example.test/image.png",
+      },
+    });
+
+    const accepted = await acceptMessage({
+      chatId: chat.id,
+      userAccountId,
+      content: "edit this",
+      titleSource: "edit this",
+      attachmentIds: [attachment.id],
+      idempotencyKey: `attachment-${chat.id}`,
+      traceId: "trace-attachment",
+    });
+    const bound = await prisma.attachment.findUniqueOrThrow({
+      where: { id: attachment.id },
+    });
+
+    expect(bound.messageId).toBe(accepted.userMessageId);
+    expect(bound.chatId).toBe(accepted.chatId);
+
+    await prisma.chat.delete({ where: { id: chat.id } });
+  });
 });

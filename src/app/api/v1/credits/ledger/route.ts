@@ -102,7 +102,7 @@ export async function GET(request: Request) {
           kind: entry.kind,
           toolName: entry.toolName,
           runId: entry.runId,
-          toolInvocationId: null,
+          toolInvocationId: entry.toolInvocationId,
           // Model usage is recorded at zero application credits so the turn
           // stays auditable; only Magica tools actually bill. A tool's own
           // settle row can also be zero when the estimate was exact, so the

@@ -26,6 +26,15 @@ describe("readServerEnv", () => {
     ).toMatchObject({ OPENROUTER_MODEL: "openrouter/free" });
   });
 
+  it("accepts a comma-separated frontend origin allowlist", () => {
+    expect(
+      readServerEnv({
+        ...validEnv,
+        FRONTEND_ORIGIN: "https://app.example.test,http://localhost:3000",
+      }).FRONTEND_ORIGIN,
+    ).toContain(",");
+  });
+
   it("reports invalid field names without values", () => {
     const invalid = { ...validEnv, OPENROUTER_MODEL: "paid/model" };
 

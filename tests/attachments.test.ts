@@ -23,11 +23,13 @@ type Row = {
   height: number | null;
   filename: string | null;
   resultUrl: string | null;
+  userMessage: string | null;
   order: number;
   createdAt: Date;
 };
 
 let rows: Row[];
+let quotaUsed: bigint;
 
 function blank(id: string, ownerId = "user_a"): Row {
   return {
@@ -43,6 +45,7 @@ function blank(id: string, ownerId = "user_a"): Row {
     height: null,
     filename: "cat.png",
     resultUrl: null,
+    userMessage: null,
     order: 0,
     createdAt: new Date(),
   };
@@ -83,6 +86,7 @@ const attachment = {
       return row;
     },
   ),
+  updateMany: vi.fn(async () => ({ count: 0 })),
 };
 
 const chat = {
@@ -91,7 +95,18 @@ const chat = {
   ),
 };
 
-vi.mock("@/db/client", () => ({ prisma: { attachment, chat } }));
+const prisma = {
+  attachment,
+  chat,
+  $queryRaw: vi.fn(async (strings: TemplateStringsArray) =>
+    strings.join("").includes("SUM")
+      ? [{ used: quotaUsed }]
+      : [{ pg_advisory_xact_lock: null }],
+  ),
+  $transaction: vi.fn(async (body: (tx: unknown) => unknown) => body(prisma)),
+};
+
+vi.mock("@/db/client", () => ({ prisma }));
 
 const fetchMock = vi.fn();
 vi.stubGlobal("fetch", fetchMock);
@@ -101,6 +116,8 @@ process.env.TRANSLOADIT_AUTH_SECRET = "test_secret";
 
 const { signUpload, transloaditDate } =
   await import("@/attachments/transloadit");
+const { MAX_ATTACHMENT_BYTES, MONTHLY_ATTACHMENT_BYTES } =
+  await import("@/contracts/attachments");
 const {
   AttachmentError,
   completeUpload,
@@ -118,6 +135,7 @@ function assemblyResponse(body: unknown, status = 200) {
 
 beforeEach(() => {
   rows = [];
+  quotaUsed = 0n;
   vi.clearAllMocks();
 });
 
@@ -147,7 +165,7 @@ describe("signing", () => {
     expect(signed.params).toContain("test_key");
   });
 
-  it("constrains the upload to images under the size cap", () => {
+  it("constrains the upload to supported media under the size cap", () => {
     const params = JSON.parse(
       signUpload({ attachmentId: "att_1", ownerId: "user_a" }).params,
     );
@@ -163,7 +181,13 @@ describe("signing", () => {
       "image/png",
     );
     expect(JSON.stringify(params.steps.filtered.accepts)).toContain(
-      String(10 * 1024 * 1024),
+      "video/mp4",
+    );
+    expect(JSON.stringify(params.steps.filtered.accepts)).toContain(
+      "audio/mpeg",
+    );
+    expect(JSON.stringify(params.steps.filtered.accepts)).toContain(
+      String(MAX_ATTACHMENT_BYTES),
     );
   });
 
@@ -202,6 +226,22 @@ describe("signing", () => {
       }),
     ).rejects.toBeInstanceOf(AttachmentError);
 
+    expect(attachment.create).not.toHaveBeenCalled();
+  });
+
+  it("serialises and refuses a monthly quota overrun", async () => {
+    quotaUsed = BigInt(MONTHLY_ATTACHMENT_BYTES - 100);
+
+    await expect(
+      createSignedUpload({
+        ownerId: "user_a",
+        filename: "clip.mp4",
+        mimeType: "video/mp4",
+        fileSize: 101,
+      }),
+    ).rejects.toMatchObject({ code: "monthly_upload_quota", status: 429 });
+
+    expect(prisma.$queryRaw).toHaveBeenCalledTimes(2);
     expect(attachment.create).not.toHaveBeenCalled();
   });
 });
@@ -284,8 +324,9 @@ describe("completion", () => {
     const result = await completeUpload(call);
 
     expect(result.status).toBe("FAILED");
-    expect(result.userMessage).toContain("images");
+    expect(result.userMessage).toContain("image, video, or audio");
     expect(result.url).toBeNull();
+    expect(rows[0].userMessage).toBe(result.userMessage);
   });
 
   it("reports a still-running Assembly without settling it", async () => {
@@ -313,7 +354,17 @@ describe("completion", () => {
   it("fails the attachment when the upload service cannot be reached", async () => {
     fetchMock.mockResolvedValue(assemblyResponse({}, 503));
 
-    expect(await completeUpload(call)).toMatchObject({ status: "FAILED" });
+    const failed = await completeUpload(call);
+
+    expect(failed).toMatchObject({ status: "FAILED" });
+    expect(rows[0].userMessage).toBe(failed.userMessage);
+
+    fetchMock.mockResolvedValue(assemblyResponse(COMPLETED));
+
+    await expect(completeUpload(call)).resolves.toMatchObject({
+      status: "READY",
+      userMessage: null,
+    });
   });
 });
 

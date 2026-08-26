@@ -3,15 +3,16 @@ import type { RequestContext } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
 import {
   AttachmentError,
-  bindAttachments,
   resolveReadyAttachments,
 } from "@/services/attachments";
 import { ensureRunDispatched } from "@/services/dispatchRun";
 import {
   ActiveRunExistsError,
+  AttachmentBindingError,
   ChatNotFoundError,
   acceptMessage,
 } from "@/services/messages";
+import { UserRunLimitError } from "@/services/runLimits";
 
 /**
  * The one send implementation.
@@ -66,6 +67,8 @@ export async function handleSend(
       idempotencyKey: input.idempotencyKey,
       traceId: trace,
       planMode: input.planMode ?? false,
+      attachmentIds: attachments.map((attachment) => attachment.id),
+      titleSource: input.content,
     });
   } catch (error) {
     if (error instanceof ChatNotFoundError) {
@@ -78,15 +81,25 @@ export async function handleSend(
       return errorResponse("CONFLICT", { trace });
     }
 
-    throw error;
-  }
+    if (error instanceof AttachmentBindingError) {
+      return errorResponse("BAD_REQUEST", {
+        message: "One or more attachments are already in use or unavailable.",
+        trace,
+      });
+    }
 
-  if (!accepted.replayed && attachments.length > 0) {
-    await bindAttachments({
-      chatId: accepted.chatId,
-      messageId: accepted.userMessageId,
-      attachmentIds: attachments.map((attachment) => attachment.id),
-    });
+    if (error instanceof UserRunLimitError) {
+      return errorResponse("RATE_LIMITED", {
+        message:
+          error.reason === "concurrency"
+            ? "Too many turns are already running. Wait for one to finish."
+            : "Too many turns were started recently. Try again shortly.",
+        trace,
+        headers: { "retry-after": String(error.retryAfterSeconds) },
+      });
+    }
+
+    throw error;
   }
 
   // Delivery can fail after the DB transaction (bad environment, network

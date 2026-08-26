@@ -246,7 +246,11 @@ export const SendMessageRequestSchema = z.object({
   content: z.string().min(1).max(16_000),
   /** Client-generated, reused when retrying the same logical send. */
   idempotencyKey: z.string().min(8).max(128),
-  attachmentIds: z.array(z.string()).max(10).optional(),
+  attachmentIds: z
+    .array(z.string())
+    .max(10)
+    .refine((ids) => new Set(ids).size === ids.length, "must be unique")
+    .optional(),
   /**
    * Composer plan mode. When set, a turn that wants to run tools pauses and
    * shows its plan for approval before spending anything.
