@@ -7,6 +7,7 @@ import { prisma } from "@/db/client";
 import { decodeChatCursor, encodeCursor } from "@/db/cursor";
 import { withAuth } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
+import { readJsonBody } from "@/http/body";
 import { serializeChat } from "@/services/serialize";
 
 const DEFAULT_LIMIT = 30;
@@ -105,7 +106,9 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   return withAuth(request, async ({ userAccountId, trace }) => {
-    const parsed = CreateChatRequestSchema.safeParse(await request.json());
+    const parsed = CreateChatRequestSchema.safeParse(
+      await readJsonBody(request),
+    );
 
     if (!parsed.success) {
       return errorResponse("BAD_REQUEST", {

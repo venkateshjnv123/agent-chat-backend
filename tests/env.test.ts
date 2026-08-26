@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { readServerEnv } from "@/env/server";
+import { readOpenRouterEnv, readServerEnv } from "@/env/server";
 
 const validEnv = {
   DATABASE_URL: "postgresql://user:pass@db.example.test/app",
@@ -32,5 +32,16 @@ describe("readServerEnv", () => {
     expect(() => readServerEnv(invalid)).toThrow(
       "Invalid server environment: OPENROUTER_MODEL",
     );
+  });
+});
+
+describe("readOpenRouterEnv", () => {
+  it("enforces the free routing model at provider call time", () => {
+    expect(() =>
+      readOpenRouterEnv({
+        OPENROUTER_API_KEY: "secret",
+        OPENROUTER_MODEL: "paid/model",
+      }),
+    ).toThrow("Invalid server environment: OPENROUTER_MODEL");
   });
 });

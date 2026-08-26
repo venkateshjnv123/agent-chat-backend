@@ -1,4 +1,5 @@
 import { SendMessageRequestSchema } from "@/contracts/chat";
+import { readJsonBody } from "@/http/body";
 import { withAuth } from "@/http/context";
 import { errorResponse } from "@/http/errors";
 import { handleSend } from "@/services/send";
@@ -12,7 +13,9 @@ import { handleSend } from "@/services/send";
  */
 export async function POST(request: Request) {
   return withAuth(request, async (context) => {
-    const parsed = SendMessageRequestSchema.safeParse(await request.json());
+    const parsed = SendMessageRequestSchema.safeParse(
+      await readJsonBody(request),
+    );
 
     if (!parsed.success) {
       return errorResponse("BAD_REQUEST", {

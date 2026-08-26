@@ -62,12 +62,41 @@ export const ServerEnvSchema = z.object({
   TRANSLOADIT_AUTH_SECRET: optionalString,
 });
 
+const OpenRouterEnvSchema = ServerEnvSchema.pick({
+  OPENROUTER_API_KEY: true,
+  OPENROUTER_MODEL: true,
+});
+
 export type ServerEnv = z.infer<typeof ServerEnvSchema>;
 
 export function readServerEnv(
   source: Record<string, string | undefined> = process.env,
 ): ServerEnv {
   const result = ServerEnvSchema.safeParse(source);
+
+  if (!result.success) {
+    const fields = [
+      ...new Set(result.error.issues.map((issue) => issue.path.join("."))),
+    ].sort();
+
+    throw new Error(`Invalid server environment: ${fields.join(", ")}`);
+  }
+
+  return result.data;
+}
+
+/**
+ * Reads only the OpenRouter settings when a model call is made.
+ *
+ * The literal model is checked here as well as in the full startup schema. A
+ * serverless route does not necessarily call `readServerEnv` before the worker
+ * opens a provider stream, so relying on startup validation alone could let a
+ * changed environment silently select a paid model.
+ */
+export function readOpenRouterEnv(
+  source: Record<string, string | undefined> = process.env,
+): Pick<ServerEnv, "OPENROUTER_API_KEY" | "OPENROUTER_MODEL"> {
+  const result = OpenRouterEnvSchema.safeParse(source);
 
   if (!result.success) {
     const fields = [

@@ -13,7 +13,7 @@ import {
   withProviderRetry,
   type RetryOptions,
 } from "@/agent/retry";
-import { readRequiredEnv } from "@/env/server";
+import { readOpenRouterEnv } from "@/env/server";
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -56,10 +56,7 @@ export class OpenRouterProvider implements AgentProvider {
    * a drop after that point surfaces as a failed, retryable turn instead.
    */
   private async open(request: AgentTurnRequest): Promise<Response> {
-    const { OPENROUTER_API_KEY, OPENROUTER_MODEL } = readRequiredEnv([
-      "OPENROUTER_API_KEY",
-      "OPENROUTER_MODEL",
-    ]);
+    const { OPENROUTER_API_KEY, OPENROUTER_MODEL } = readOpenRouterEnv();
 
     return withProviderRetry(
       async () => {

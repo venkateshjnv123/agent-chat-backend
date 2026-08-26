@@ -6,6 +6,10 @@ import {
   type ToolCall,
 } from "@/agent/provider";
 import { buildSystemPrompt } from "@/agent/prompt";
+import {
+  MAX_CONTEXT_MESSAGES,
+  selectBoundedConversation,
+} from "@/agent/context";
 import { OpenRouterProvider } from "@/agent/providers/openrouter";
 import { PermanentProviderError, TransientProviderError } from "@/agent/retry";
 import { agentToolSchemas } from "@/agent/tools";
@@ -14,6 +18,11 @@ import { estimateCredits } from "@/magica/client";
 import { recordModelUsage } from "@/services/creditLedger";
 import { formatEstimate } from "@/services/credits";
 import { finalizeCancelledRun } from "@/services/cancelRun";
+import {
+  checkpointAssistantText,
+  STREAM_CHECKPOINT_CHARACTERS,
+  STREAM_CHECKPOINT_INTERVAL_MS,
+} from "@/services/messageStream";
 import { callFingerprint, needsPlanApproval } from "@/services/planGate";
 import {
   acknowledgePlanResolution,
@@ -150,6 +159,9 @@ export const agentTurn = task({
       let exhausted = false;
       let cancellationObserved = false;
       let lastCancellationCheck = 0;
+      let checkpointedCharacters = 0;
+      let nextCheckpointAt = 0;
+      let streamStarted = false;
       // Approval is scoped to the exact calls that were shown, not to the run.
       // A chained task discovers its later arguments only after the earlier
       // step has produced them, so those calls were never on the card the user
@@ -188,6 +200,30 @@ export const agentTurn = task({
             text += chunk.text;
             textStream.push({ turn: turns, text: chunk.text });
             metadata.set("streamedCharacters", text.length);
+
+            const now = Date.now();
+            const checkpointDue =
+              !streamStarted ||
+              (text.length - checkpointedCharacters >=
+                STREAM_CHECKPOINT_CHARACTERS &&
+                now >= nextCheckpointAt);
+
+            if (checkpointDue) {
+              // Move the deadline before I/O so a temporary database failure
+              // does not turn every following token into another write attempt.
+              streamStarted = true;
+              checkpointedCharacters = text.length;
+              nextCheckpointAt = now + STREAM_CHECKPOINT_INTERVAL_MS;
+
+              try {
+                await checkpointAssistantText(payload.assistantMessageId, text);
+              } catch (error) {
+                log("assistant text checkpoint failed", {
+                  reason:
+                    error instanceof Error ? error.message : String(error),
+                });
+              }
+            }
           } else {
             routedModel = chunk.routedModel ?? routedModel;
             // Usage is per model call; the turn total is what the run records.
@@ -822,16 +858,12 @@ async function restoreConversation(
       id: { not: assistantMessageId },
       status: { in: ["SUCCESS", "STREAMING"] },
     },
-    orderBy: { sequence: "asc" },
+    orderBy: { sequence: "desc" },
+    take: MAX_CONTEXT_MESSAGES,
     select: { role: true, content: true },
   });
 
-  return rows
-    .filter((row) => row.content.length > 0)
-    .map((row) => ({
-      role: row.role === "USER" ? ("user" as const) : ("assistant" as const),
-      content: row.content,
-    }));
+  return selectBoundedConversation(rows);
 }
 
 /**

@@ -8,6 +8,7 @@ import { prisma } from "@/db/client";
 import { decodeSequenceCursor, encodeCursor } from "@/db/cursor";
 import { withAuth } from "@/http/context";
 import { errorResponse, jsonResponse } from "@/http/errors";
+import { readJsonBody } from "@/http/body";
 import { handleSend } from "@/services/send";
 import { serializeMessage } from "@/services/serialize";
 
@@ -84,7 +85,9 @@ export async function POST(
 ) {
   return withAuth(request, async (auth) => {
     const { chatId } = await context.params;
-    const parsed = SendMessageRequestSchema.safeParse(await request.json());
+    const parsed = SendMessageRequestSchema.safeParse(
+      await readJsonBody(request),
+    );
 
     if (!parsed.success) {
       return errorResponse("BAD_REQUEST", {
